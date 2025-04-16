@@ -14,6 +14,43 @@ The application attempts to:
 
 Additionally, PipeWrench includes a fallback mechanism using direct X11 capture when the portal service fails.
 
+## Important: Wayland Compatibility Notice
+
+**PipeWrench requires X11 to function properly for screen and window captures.**
+
+If you're running under Wayland (the default display server in many recent Linux distributions), screen/window captures will fail with error messages like:
+```
+❌ Failed to get screen image
+❌ Failed to capture screen image
+```
+
+### Disabling Wayland in GDM
+
+To disable Wayland and use X11 instead:
+
+1. Edit the GDM configuration file:
+   ```bash
+   sudo nano /etc/gdm3/custom.conf
+   ```
+
+2. Find the line `#WaylandEnable=false` and uncomment it:
+   ```bash
+   WaylandEnable=false
+   ```
+
+3. Save the file and restart GDM:
+   ```bash
+   sudo systemctl restart gdm
+   ```
+
+4. Log back in. You should now be using an X11 session where PipeWrench will work correctly.
+
+You can verify you're using X11 by running:
+```bash
+echo $XDG_SESSION_TYPE
+```
+It should output `x11` rather than `wayland`.
+
 ## Known Issues with Ubuntu 24.04's xdg-desktop-portal
 
 **Critical Bug: Segmentation Fault in xdg-desktop-portal**

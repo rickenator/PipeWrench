@@ -265,21 +265,65 @@ public:
             return nullptr;
         }
         
-        // Check if window is visible
-        if (attrs.map_state != IsViewable) {
-            std::cerr << "❌ Window is not viewable" << std::endl;
-            return nullptr;
+        // Check if window is visible or minimized
+        bool is_minimized = (attrs.map_state != IsViewable);
+        if (is_minimized) {
+            std::cout << "⚠️ Window is minimized or hidden, capturing screen area instead" << std::endl;
         }
         
-        // Make sure window exists
-        XCompositeRedirectWindow(display, window.id, CompositeRedirectAutomatic);
-        XSync(display, False);
+        // Get the root window for capturing
+        Window root = DefaultRootWindow(display);
         
-        // Get the window image
-        XImage* image = XGetImage(display, window.id, 0, 0, attrs.width, attrs.height, AllPlanes, ZPixmap);
+        // Log the window dimensions we're capturing
+        std::cout << "📸 Capturing window: \"" << window.title << "\" (" << window.width << "×" << window.height << ")" << std::endl;
+        
+        XImage* image = nullptr;
+        
+        if (!is_minimized) {
+            // First try to use XComposite for active windows, which gives better results
+            try {
+                // Use XComposite to redirect the window
+                XCompositeRedirectWindow(display, window.id, CompositeRedirectAutomatic);
+                XSync(display, False);
+                
+                // Create a Pixmap to hold the window contents
+                Pixmap pixmap = XCompositeNameWindowPixmap(display, window.id);
+                if (pixmap) {
+                    // Get the window image from the pixmap
+                    image = XGetImage(display, pixmap, 0, 0, attrs.width, attrs.height, AllPlanes, ZPixmap);
+                    
+                    // Free the pixmap as we don't need it anymore
+                    XFreePixmap(display, pixmap);
+                    
+                    if (image) {
+                        std::cout << "✅ Successfully captured window using XComposite method" << std::endl;
+                    } else {
+                        std::cerr << "⚠️ Failed to get window image from pixmap, falling back to root window method" << std::endl;
+                    }
+                }
+            } catch (const std::exception& e) {
+                std::cerr << "⚠️ Exception during XComposite capture: " << e.what() << std::endl;
+            }
+        }
+        
+        // Fallback method: Capture from root window
+        // This works for both visible and minimized windows (gets the area where the window is/would be)
         if (!image) {
-            std::cerr << "❌ Failed to get window image" << std::endl;
-            return nullptr;
+            image = XGetImage(display, root, 
+                             window.x, window.y, 
+                             window.width, window.height, 
+                             AllPlanes, ZPixmap);
+            
+            if (image) {
+                std::cout << "✅ Successfully captured " << (is_minimized ? "area where window would be" : "window") 
+                          << " using root window method" << std::endl;
+            } else {
+                std::cerr << "❌ Failed to get window image using root window method" << std::endl;
+            }
+        }
+        
+        if (image) {
+            std::cout << "✅ Final window image dimensions: " << image->width << "×" << image->height << std::endl;
         }
         
         return image;
@@ -316,6 +360,7 @@ public:
         // Get screen information
         Window root = DefaultRootWindow(display);
         int width, height;
+        int x_offset = 0, y_offset = 0;
         
         // Get XRandR information for multi-monitor support
         std::vector<ScreenInfo> screens = detect_screens();
@@ -338,19 +383,46 @@ public:
             
             width = target_screen->width;
             height = target_screen->height;
+            x_offset = target_screen->x;
+            y_offset = target_screen->y;
+            
+            std::cout << "📸 Capturing screen " << screen_number << ": " << target_screen->name 
+                      << " at position (" << x_offset << "," << y_offset << ") with size " 
+                      << width << "x" << height << std::endl;
         } else {
             // Capture all screens (full desktop)
             width = DisplayWidth(display, DefaultScreen(display));
             height = DisplayHeight(display, DefaultScreen(display));
+            std::cout << "📸 Capturing full desktop with size " << width << "x" << height << std::endl;
         }
         
+        // Ensure valid dimensions
+        if (width <= 0 || height <= 0) {
+            std::cerr << "❌ Invalid screen dimensions: " << width << "x" << height << std::endl;
+            return nullptr;
+        }
+
+        // Check for permissions to capture the screen
+        int xrandr_event_base, xrandr_error_base;
+        if (!XCompositeQueryExtension(display, &xrandr_event_base, &xrandr_error_base)) {
+            std::cerr << "❌ XComposite extension not available. Screen capture may not be supported." << std::endl;
+            return nullptr;
+        }
+
         // Get the screen image
-        XImage* image = XGetImage(display, root, 
-                                 target_screen ? target_screen->x : 0, 
-                                 target_screen ? target_screen->y : 0, 
-                                 width, height, AllPlanes, ZPixmap);
-        if (!image) {
-            std::cerr << "❌ Failed to get screen image" << std::endl;
+        XImage* image = nullptr;
+        try {
+            // Use XGetImage to capture the root window (desktop)
+            image = XGetImage(display, root, x_offset, y_offset, width, height, AllPlanes, ZPixmap);
+
+            if (!image) {
+                std::cerr << "❌ Failed to get screen image. Ensure the application has the necessary permissions." << std::endl;
+                return nullptr;
+            } else {
+                std::cout << "✅ Successfully captured screen image" << std::endl;
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "❌ Exception during screen capture: " << e.what() << std::endl;
             return nullptr;
         }
         
@@ -369,7 +441,7 @@ private:
         // Create Cairo surface
         cairo_surface_t* surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, image->width, image->height);
         if (cairo_surface_status(surface) != CAIRO_STATUS_SUCCESS) {
-            std::cerr << "❌ Failed to create Cairo surface" << std::endl;
+            std::cerr << "❌ Failed to create Cairo surface: " << cairo_status_to_string(cairo_surface_status(surface)) << std::endl;
             return false;
         }
         
@@ -399,6 +471,13 @@ private:
         
         // Mark the surface as dirty after modification
         cairo_surface_mark_dirty(surface);
+        
+        // Ensure directory exists
+        std::string dir_path = filename.substr(0, filename.find_last_of('/'));
+        if (!dir_path.empty()) {
+            std::string mkdir_cmd = "mkdir -p " + dir_path;
+            system(mkdir_cmd.c_str());
+        }
         
         // Write to PNG
         cairo_status_t status = cairo_surface_write_to_png(surface, filename.c_str());
@@ -966,9 +1045,11 @@ protected:
             status_bar.push("Capturing window: " + window_info->title);
             
             if (format == "jpg") {
-                if (save_image_as_jpeg(window_capturer.capture_window_image(*window_info), filename)) {
+                XImage* image = window_capturer.capture_window_image(*window_info);
+                if (image && save_image_as_jpeg(image, filename)) {
                     status_bar.push("Window captured successfully: " + filename);
                     recent_captures_panel.refresh();
+                    XDestroyImage(image);
                 } else {
                     status_bar.push("Failed to capture window.");
                 }
@@ -992,9 +1073,11 @@ protected:
             status_bar.push("Capturing screen: " + screen_info->name);
             
             if (format == "jpg") {
-                if (save_image_as_jpeg(window_capturer.capture_screen_image(screen_info->number), filename)) {
+                XImage* image = window_capturer.capture_screen_image(screen_info->number);
+                if (image && save_image_as_jpeg(image, filename)) {
                     status_bar.push("Screen captured successfully: " + filename);
                     recent_captures_panel.refresh();
+                    XDestroyImage(image);
                 } else {
                     status_bar.push("Failed to capture screen.");
                 }
@@ -1229,6 +1312,29 @@ int main(int argc, char* argv[]) {
     std::cout << "🔧 Initializing Gtk::Application..." << std::endl;
     auto app = Gtk::Application::create(argc, argv, "org.example.PipeWrench");
     std::cout << "✅ Gtk::Application created." << std::endl;
+
+    // Check for Wayland session and show warning
+    const char* session_type = getenv("XDG_SESSION_TYPE");
+    bool is_wayland = session_type && (strcmp(session_type, "wayland") == 0);
+    
+    if (is_wayland) {
+        std::cout << "⚠️  WARNING: Running under Wayland!" << std::endl;
+        std::cout << "⚠️  Screen and window capture will likely fail." << std::endl;
+        std::cout << "⚠️  See README.md for instructions on disabling Wayland." << std::endl;
+        
+        // Show warning dialog
+        Gtk::MessageDialog dialog("PipeWrench - Wayland Compatibility Warning", 
+                                 false, Gtk::MESSAGE_WARNING, Gtk::BUTTONS_OK);
+        dialog.set_secondary_text(
+            "You are running under Wayland, which is not compatible with PipeWrench's capture methods.\n\n"
+            "Screen and window captures will likely fail.\n\n"
+            "To use PipeWrench, please disable Wayland by editing /etc/gdm3/custom.conf\n"
+            "and setting WaylandEnable=false, then restart GDM with:\n"
+            "sudo systemctl restart gdm");
+        dialog.run();
+    } else {
+        std::cout << "✅ Running under X11 session." << std::endl;
+    }
 
     // Connect the activate signal to a lambda that creates the window
     app->signal_activate().connect([app]() {
