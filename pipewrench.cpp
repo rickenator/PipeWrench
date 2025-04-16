@@ -33,10 +33,398 @@
 #include <ctime>
 #include <cairo/cairo.h>
 #include <cairo/cairo-xlib.h>
+#include <jpeglib.h> // Added JPEG library support
+#include <algorithm> // For std::sort
+#include <chrono>    // For timestamp comparison
+#include <dirent.h>  // For directory listing
 extern "C" {
 #include <glib.h>
 #include <gio/gio.h>
 }
+
+// Forward declarations
+class MyWindow;
+class RecentCapturesPanel;
+
+// X11ScreenCapturer implementation
+class X11ScreenCapturer {
+public:
+    struct WindowInfo {
+        Window id;
+        std::string title;
+        int x, y;
+        unsigned int width, height;
+        bool has_decorations;
+        bool is_visible;
+    };
+    
+    struct ScreenInfo {
+        int number;
+        std::string name;
+        int x, y;
+        unsigned int width, height;
+    };
+    
+    X11ScreenCapturer() {
+        display = XOpenDisplay(nullptr);
+        if (!display) {
+            std::cerr << "❌ Failed to open X display" << std::endl;
+        }
+    }
+    
+    ~X11ScreenCapturer() {
+        if (display) {
+            XCloseDisplay(display);
+        }
+    }
+    
+    std::vector<WindowInfo> list_windows() {
+        std::vector<WindowInfo> windows;
+        
+        if (!display) {
+            std::cerr << "❌ No X display connection" << std::endl;
+            return windows;
+        }
+        
+        // Get the root window
+        Window root = DefaultRootWindow(display);
+        
+        // Get all top-level windows
+        Window root_return, parent_return;
+        Window* children;
+        unsigned int num_children;
+        
+        Status status = XQueryTree(display, root, &root_return, &parent_return, &children, &num_children);
+        
+        if (status == 0) {
+            std::cerr << "❌ Failed to query window tree" << std::endl;
+            return windows;
+        }
+        
+        // Filter windows to get only those with titles
+        for (unsigned int i = 0; i < num_children; i++) {
+            WindowInfo info;
+            info.id = children[i];
+            
+            // Get window attributes
+            XWindowAttributes attrs;
+            if (XGetWindowAttributes(display, info.id, &attrs)) {
+                info.width = attrs.width;
+                info.height = attrs.height;
+                info.x = attrs.x;
+                info.y = attrs.y;
+                info.is_visible = (attrs.map_state == IsViewable);
+                
+                // Skip invisible windows
+                if (!info.is_visible) {
+                    continue;
+                }
+                
+                // Get window title
+                char* window_name = nullptr;
+                if (XFetchName(display, info.id, &window_name) && window_name) {
+                    info.title = window_name;
+                    XFree(window_name);
+                } else {
+                    // Try to get WM_NAME property if XFetchName fails
+                    XTextProperty text_prop;
+                    if (XGetWMName(display, info.id, &text_prop) && text_prop.value) {
+                        info.title = reinterpret_cast<char*>(text_prop.value);
+                        XFree(text_prop.value);
+                    } else {
+                        info.title = "[Unnamed Window]";
+                    }
+                }
+                
+                // Skip windows without meaningful titles
+                if (info.title.empty() || info.title == "[Unnamed Window]") {
+                    continue;
+                }
+                
+                windows.push_back(info);
+            }
+        }
+        
+        XFree(children);
+        
+        // Sort windows by title
+        std::sort(windows.begin(), windows.end(), 
+                 [](const WindowInfo& a, const WindowInfo& b) {
+                     return a.title < b.title;
+                 });
+        
+        return windows;
+    }
+    
+    std::vector<ScreenInfo> detect_screens() {
+        std::vector<ScreenInfo> screens;
+        
+        if (!display) {
+            std::cerr << "❌ No X display connection" << std::endl;
+            return screens;
+        }
+        
+        // Get default screen
+        int screen_count = ScreenCount(display);
+        
+        // Add "all screens" option
+        ScreenInfo all_screens;
+        all_screens.number = -1;
+        all_screens.name = "All Screens";
+        all_screens.x = 0;
+        all_screens.y = 0;
+        all_screens.width = DisplayWidth(display, DefaultScreen(display));
+        all_screens.height = DisplayHeight(display, DefaultScreen(display));
+        screens.push_back(all_screens);
+        
+        // Get XRandR extension information for multi-monitor support
+        int xrandr_event_base, xrandr_error_base;
+        if (XRRQueryExtension(display, &xrandr_event_base, &xrandr_error_base)) {
+            // Get screen resources
+            XRRScreenResources* resources = XRRGetScreenResources(display, DefaultRootWindow(display));
+            if (resources) {
+                for (int i = 0; i < resources->noutput; i++) {
+                    XRROutputInfo* output_info = XRRGetOutputInfo(display, resources, resources->outputs[i]);
+                    
+                    if (output_info->connection == RR_Connected) {
+                        // Find the CRTC for this output
+                        if (output_info->crtc) {
+                            XRRCrtcInfo* crtc_info = XRRGetCrtcInfo(display, resources, output_info->crtc);
+                            
+                            if (crtc_info) {
+                                ScreenInfo screen;
+                                screen.number = i;
+                                screen.name = output_info->name;
+                                screen.x = crtc_info->x;
+                                screen.y = crtc_info->y;
+                                screen.width = crtc_info->width;
+                                screen.height = crtc_info->height;
+                                
+                                screens.push_back(screen);
+                                
+                                XRRFreeCrtcInfo(crtc_info);
+                            }
+                        }
+                    }
+                    
+                    XRRFreeOutputInfo(output_info);
+                }
+                
+                XRRFreeScreenResources(resources);
+            }
+        } else {
+            // Fallback if XRandR is not available - add each screen
+            for (int i = 0; i < screen_count; i++) {
+                ScreenInfo screen;
+                screen.number = i;
+                screen.name = "Screen " + std::to_string(i);
+                screen.x = 0;
+                screen.y = 0;
+                screen.width = DisplayWidth(display, i);
+                screen.height = DisplayHeight(display, i);
+                
+                screens.push_back(screen);
+            }
+        }
+        
+        return screens;
+    }
+    
+    bool capture_window(const WindowInfo& window, const std::string& filename) {
+        if (!display) {
+            std::cerr << "❌ No X display connection" << std::endl;
+            return false;
+        }
+        
+        // Get the window image
+        XImage* image = capture_window_image(window);
+        if (!image) {
+            std::cerr << "❌ Failed to capture window image" << std::endl;
+            return false;
+        }
+        
+        // Save to PNG using Cairo
+        bool result = save_image_to_png(image, filename);
+        
+        // Free the image
+        XDestroyImage(image);
+        
+        return result;
+    }
+    
+    XImage* capture_window_image(const WindowInfo& window) {
+        if (!display) {
+            std::cerr << "❌ No X display connection" << std::endl;
+            return nullptr;
+        }
+        
+        // Get window attributes
+        XWindowAttributes attrs;
+        if (!XGetWindowAttributes(display, window.id, &attrs)) {
+            std::cerr << "❌ Failed to get window attributes" << std::endl;
+            return nullptr;
+        }
+        
+        // Check if window is visible
+        if (attrs.map_state != IsViewable) {
+            std::cerr << "❌ Window is not viewable" << std::endl;
+            return nullptr;
+        }
+        
+        // Make sure window exists
+        XCompositeRedirectWindow(display, window.id, CompositeRedirectAutomatic);
+        XSync(display, False);
+        
+        // Get the window image
+        XImage* image = XGetImage(display, window.id, 0, 0, attrs.width, attrs.height, AllPlanes, ZPixmap);
+        if (!image) {
+            std::cerr << "❌ Failed to get window image" << std::endl;
+            return nullptr;
+        }
+        
+        return image;
+    }
+    
+    bool capture_screen(int screen_number, const std::string& filename) {
+        if (!display) {
+            std::cerr << "❌ No X display connection" << std::endl;
+            return false;
+        }
+        
+        // Get the screen image
+        XImage* image = capture_screen_image(screen_number);
+        if (!image) {
+            std::cerr << "❌ Failed to capture screen image" << std::endl;
+            return false;
+        }
+        
+        // Save to PNG using Cairo
+        bool result = save_image_to_png(image, filename);
+        
+        // Free the image
+        XDestroyImage(image);
+        
+        return result;
+    }
+    
+    XImage* capture_screen_image(int screen_number) {
+        if (!display) {
+            std::cerr << "❌ No X display connection" << std::endl;
+            return nullptr;
+        }
+        
+        // Get screen information
+        Window root = DefaultRootWindow(display);
+        int width, height;
+        
+        // Get XRandR information for multi-monitor support
+        std::vector<ScreenInfo> screens = detect_screens();
+        
+        // Find the requested screen
+        const ScreenInfo* target_screen = nullptr;
+        if (screen_number >= 0) {
+            // Find the specific screen
+            for (const auto& screen : screens) {
+                if (screen.number == screen_number) {
+                    target_screen = &screen;
+                    break;
+                }
+            }
+            
+            if (!target_screen) {
+                std::cerr << "❌ Screen number " << screen_number << " not found" << std::endl;
+                return nullptr;
+            }
+            
+            width = target_screen->width;
+            height = target_screen->height;
+        } else {
+            // Capture all screens (full desktop)
+            width = DisplayWidth(display, DefaultScreen(display));
+            height = DisplayHeight(display, DefaultScreen(display));
+        }
+        
+        // Get the screen image
+        XImage* image = XGetImage(display, root, 
+                                 target_screen ? target_screen->x : 0, 
+                                 target_screen ? target_screen->y : 0, 
+                                 width, height, AllPlanes, ZPixmap);
+        if (!image) {
+            std::cerr << "❌ Failed to get screen image" << std::endl;
+            return nullptr;
+        }
+        
+        return image;
+    }
+    
+private:
+    Display* display;
+    
+    bool save_image_to_png(XImage* image, const std::string& filename) {
+        if (!image) {
+            std::cerr << "❌ No image to save" << std::endl;
+            return false;
+        }
+        
+        // Create Cairo surface
+        cairo_surface_t* surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, image->width, image->height);
+        if (cairo_surface_status(surface) != CAIRO_STATUS_SUCCESS) {
+            std::cerr << "❌ Failed to create Cairo surface" << std::endl;
+            return false;
+        }
+        
+        // Get Cairo surface data
+        unsigned char* data = cairo_image_surface_get_data(surface);
+        int stride = cairo_image_surface_get_stride(surface);
+        
+        // Copy image data to Cairo surface
+        for (int y = 0; y < image->height; y++) {
+            for (int x = 0; x < image->width; x++) {
+                unsigned long pixel = XGetPixel(image, x, y);
+                
+                // X11 returns pixel values in platform's native format, need to extract ARGB
+                unsigned char a = 0xFF; // Fully opaque
+                unsigned char r = (pixel >> 16) & 0xFF;
+                unsigned char g = (pixel >> 8) & 0xFF;
+                unsigned char b = pixel & 0xFF;
+                
+                // Cairo uses premultiplied alpha in ARGB format
+                unsigned char* p = data + y * stride + x * 4;
+                p[0] = b;
+                p[1] = g;
+                p[2] = r;
+                p[3] = a;
+            }
+        }
+        
+        // Mark the surface as dirty after modification
+        cairo_surface_mark_dirty(surface);
+        
+        // Write to PNG
+        cairo_status_t status = cairo_surface_write_to_png(surface, filename.c_str());
+        
+        // Clean up
+        cairo_surface_destroy(surface);
+        
+        if (status != CAIRO_STATUS_SUCCESS) {
+            std::cerr << "❌ Failed to write image to PNG: " << cairo_status_to_string(status) << std::endl;
+            return false;
+        }
+        
+        std::cout << "✅ Image saved to PNG: " << filename << std::endl;
+        return true;
+    }
+};
+
+// Define a struct to store information about captured files
+struct CaptureInfo {
+    std::string filename;
+    std::string timestamp;
+    std::string type; // "window" or "screen"
+    std::string dimensions;
+    std::string source_name;
+    std::filesystem::file_time_type file_time;
+};
 
 Glib::ustring generate_token() {
     uuid_t uuid;
@@ -72,961 +460,308 @@ bool ensure_captures_directory() {
     return true;
 }
 
-// X11-based screen capture functionality with improved window detection
-class X11ScreenCapturer {
-public:
-    // Structure to represent a window
-    struct WindowInfo {
-        Window id;
-        std::string title;
-        std::string wm_class;  // Added WM_CLASS for better window identification
-        int x, y, width, height;
-        bool visible;
-        bool has_wm_class;     // Flag to indicate if WM_CLASS is available
-        bool has_decorations;   // Flag to indicate if this is the decorated version
-        Window parent;          // Parent window ID for hierarchy detection
-        std::string window_type; // For debugging: "normal", "decorated", "undecorated", etc.
-    };
-    
-    X11ScreenCapturer() : display_(nullptr), width_(0), height_(0), root_(0), pixmap_(0) {
-        initialize();
+// Save image as JPEG file
+bool save_image_as_jpeg(XImage* image, const std::string& filename, int quality = 90) {
+    if (!image) {
+        std::cerr << "❌ No image to save as JPEG" << std::endl;
+        return false;
     }
     
-    ~X11ScreenCapturer() {
-        cleanup();
+    FILE* outfile = fopen(filename.c_str(), "wb");
+    if (!outfile) {
+        std::cerr << "❌ Error opening JPEG output file: " << filename << std::endl;
+        return false;
     }
     
-    bool initialize() {
-        display_ = XOpenDisplay(nullptr);
-        if (!display_) {
-            std::cerr << "❌ Failed to open X11 display" << std::endl;
-            return false;
-        }
-        
-        int screen = DefaultScreen(display_);
-        root_ = RootWindow(display_, screen);
-        
-        // Get screen dimensions
-        width_ = DisplayWidth(display_, screen);
-        height_ = DisplayHeight(display_, screen);
-        
-        std::cout << "✅ X11 Screen Capturer initialized with resolution: " 
-                  << width_ << "x" << height_ << std::endl;
-        return true;
-    }
+    // Set up JPEG compression structures
+    struct jpeg_compress_struct cinfo;
+    struct jpeg_error_mgr jerr;
     
-    void cleanup() {
-        if (pixmap_) {
-            XFreePixmap(display_, pixmap_);
-            pixmap_ = 0;
-        }
-        
-        if (display_) {
-            XCloseDisplay(display_);
-            display_ = nullptr;
-        }
-    }
+    cinfo.err = jpeg_std_error(&jerr);
+    jpeg_create_compress(&cinfo);
+    jpeg_stdio_dest(&cinfo, outfile);
     
-    // Get list of all windows on the display with improved detection
-    std::vector<WindowInfo> list_windows() {
-        std::vector<WindowInfo> windows;
-        
-        if (!display_) {
-            std::cerr << "❌ X11 display not initialized" << std::endl;
-            return windows;
-        }
-        
-        // For debugging
-        std::cout << "🔍 Looking for windows using multiple methods..." << std::endl;
-        
-        // Method 1: Get windows via XQueryTree (top-level only)
-        windows = get_windows_via_query_tree();
-        
-        // Method 2: Get active windows from _NET_CLIENT_LIST
-        std::vector<WindowInfo> net_client_windows = get_windows_from_net_client_list();
-        
-        // Method 3: Recursively search for child windows with content
-        std::vector<WindowInfo> deep_windows = get_windows_recursive(root_, 0);
-        
-        // Merge the results, prioritizing windows from _NET_CLIENT_LIST
-        std::map<Window, bool> added_windows;
-        std::vector<WindowInfo> merged_windows;
-        
-        // First add windows from _NET_CLIENT_LIST (most reliable for apps)
-        for (const auto& win : net_client_windows) {
-            if (win.width > 50 && win.height > 50) {
-                merged_windows.push_back(win);
-                added_windows[win.id] = true;
-            }
-        }
-        
-        // Then add from XQueryTree if not already added
-        for (const auto& win : windows) {
-            if (!added_windows[win.id] && win.width > 50 && win.height > 50) {
-                merged_windows.push_back(win);
-                added_windows[win.id] = true;
-            }
-        }
-        
-        // Finally add any missing windows from recursive search
-        for (const auto& win : deep_windows) {
-            if (!added_windows[win.id] && win.width > 50 && win.height > 50 && 
-                (!win.title.empty() || !win.wm_class.empty())) {
-                merged_windows.push_back(win);
-                added_windows[win.id] = true;
-            }
-        }
-        
-        // Debug output
-        std::cout << "📊 Found " << merged_windows.size() << " unique windows total (before filtering)" << std::endl;
-        
-        return merged_windows;
-    }
+    // Set image parameters
+    cinfo.image_width = image->width;
+    cinfo.image_height = image->height;
+    cinfo.input_components = 3; // RGB
+    cinfo.in_color_space = JCS_RGB;
     
-    // Get windows using the _NET_CLIENT_LIST property (EWMH standard)
-    std::vector<WindowInfo> get_windows_from_net_client_list() {
-        std::vector<WindowInfo> windows;
-        
-        // Get _NET_CLIENT_LIST property
-        Atom net_client_list = XInternAtom(display_, "_NET_CLIENT_LIST", True);
-        Atom actual_type;
-        int actual_format;
-        unsigned long n_items, bytes_after;
-        unsigned char* prop = nullptr;
-        
-        if (net_client_list != None &&
-            XGetWindowProperty(display_, root_, net_client_list, 0, 1024, False, 
-                              AnyPropertyType, &actual_type, &actual_format, 
-                              &n_items, &bytes_after, &prop) == Success && 
-            prop != nullptr) {
+    // Set defaults and quality
+    jpeg_set_defaults(&cinfo);
+    jpeg_set_quality(&cinfo, quality, TRUE);
+    
+    // Start compression
+    jpeg_start_compress(&cinfo, TRUE);
+    
+    // Allocate memory for one row of image data in RGB format
+    JSAMPROW row_pointer[1];
+    row_pointer[0] = new JSAMPLE[cinfo.image_width * 3];
+    
+    // Process each row
+    while (cinfo.next_scanline < cinfo.image_height) {
+        // Convert row from BGRA/RGBA to RGB format
+        for (int x = 0; x < cinfo.image_width; x++) {
+            unsigned long pixel = XGetPixel(image, x, cinfo.next_scanline);
             
-            Window* client_list = reinterpret_cast<Window*>(prop);
-            std::cout << "📋 Found " << n_items << " windows in _NET_CLIENT_LIST" << std::endl;
+            // X11 returns pixel values in platform's native format, need to extract RGB
+            unsigned char r = (pixel >> 16) & 0xFF;
+            unsigned char g = (pixel >> 8) & 0xFF;
+            unsigned char b = pixel & 0xFF;
             
-            for (unsigned long i = 0; i < n_items; i++) {
-                WindowInfo info = get_window_info(client_list[i]);
+            row_pointer[0][x * 3 + 0] = r;
+            row_pointer[0][x * 3 + 1] = g;
+            row_pointer[0][x * 3 + 2] = b;
+        }
+        
+        jpeg_write_scanlines(&cinfo, row_pointer, 1);
+    }
+    
+    // Finish compression
+    jpeg_finish_compress(&cinfo);
+    
+    // Clean up
+    delete[] row_pointer[0];
+    jpeg_destroy_compress(&cinfo);
+    fclose(outfile);
+    
+    std::cout << "✅ Image saved as JPEG: " << filename << std::endl;
+    return true;
+}
+
+// Function to list recent captures
+std::vector<CaptureInfo> list_recent_captures(const std::string& directory = "captures") {
+    std::vector<CaptureInfo> files;
+    
+    if (!std::filesystem::exists(directory) || !std::filesystem::is_directory(directory)) {
+        std::cerr << "❌ Capture directory does not exist: " << directory << std::endl;
+        return files;
+    }
+    
+    try {
+        for (const auto& entry : std::filesystem::directory_iterator(directory)) {
+            if (entry.is_regular_file()) {
+                CaptureInfo info;
+                info.filename = entry.path().filename().string();
+                info.file_time = entry.last_write_time();
                 
-                // Add with a special tag to identify source
-                if (info.visible) {
-                    info.window_type = "EWMH";
-                    windows.push_back(info);
-                    std::cout << "  🪟 EWMH Window: \"" << info.title 
-                            << "\" Class: \"" << info.wm_class
-                            << "\" (" << info.width << "x" << info.height 
-                            << " at " << info.x << "," << info.y << ")" << std::endl;
+                // Parse information from filename
+                std::string name = info.filename;
+                
+                // Extract type (window/screen)
+                if (name.find("window_") != std::string::npos) {
+                    info.type = "window";
+                } else if (name.find("screen_") != std::string::npos) {
+                    info.type = "screen";
+                } else {
+                    info.type = "other";
                 }
-            }
-            
-            XFree(prop);
-        } else {
-            std::cout << "⚠️ _NET_CLIENT_LIST property not found" << std::endl;
-        }
-        
-        return windows;
-    }
-    
-    // Recursively find windows (helps find terminal windows and others)
-    std::vector<WindowInfo> get_windows_recursive(Window window, int depth) {
-        std::vector<WindowInfo> results;
-        
-        // Avoid going too deep (prevent infinite recursion and focus on useful windows)
-        if (depth > 3) {
-            return results;
-        }
-        
-        WindowInfo info = get_window_info(window);
-        
-        // Add current window if it has a title or class and seems to be a real window
-        if (info.visible && ((!info.title.empty() || info.has_wm_class) && 
-            info.width > 50 && info.height > 50)) {
-            results.push_back(info);
-        }
-        
-        // Get child windows
-        Window root_return, parent_return;
-        Window* children = nullptr;
-        unsigned int num_children = 0;
-        
-        Status status = XQueryTree(display_, window, &root_return, &parent_return, 
-                                  &children, &num_children);
-        
-        if (status != 0 && children != nullptr) {
-            for (unsigned int i = 0; i < num_children; i++) {
-                // Recursively get info for each child
-                std::vector<WindowInfo> child_windows = get_windows_recursive(children[i], depth + 1);
-                results.insert(results.end(), child_windows.begin(), child_windows.end());
-            }
-            
-            XFree(children);
-        }
-        
-        return results;
-    }
-    
-    // Get windows using standard XQueryTree (similar to original implementation)
-    std::vector<WindowInfo> get_windows_via_query_tree() {
-        std::vector<WindowInfo> windows;
-        
-        // Get the root window children
-        Window root_return, parent_return;
-        Window* children = nullptr;
-        unsigned int num_children = 0;
-        
-        Status status = XQueryTree(display_, root_, &root_return, &parent_return, 
-                                  &children, &num_children);
-        
-        if (status == 0 || children == nullptr) {
-            std::cerr << "❌ Failed to query window tree" << std::endl;
-            return windows;
-        }
-        
-        std::cout << "🪟 Found " << num_children << " top-level windows" << std::endl;
-        
-        // Process each window
-        for (unsigned int i = 0; i < num_children; i++) {
-            WindowInfo info = get_window_info(children[i]);
-            
-            // Only include visible windows with title or class and reasonable size
-            if (info.visible && ((!info.title.empty() || info.has_wm_class) && 
-                info.width > 50 && info.height > 50)) {
                 
-                // Skip the "mutter guard window" or other whole-screen windows if they match exactly
-                if (info.width == width_ && info.height == height_ && 
-                    (info.title.find("mutter") != std::string::npos || 
-                     info.wm_class.find("mutter") != std::string::npos)) {
-                    std::cout << "  ⚠️ Skipping probable full-screen guard window: " 
-                              << info.title << " (" << info.wm_class << ")" << std::endl;
+                // Extract timestamp
+                size_t date_pos = name.find_last_of("_");
+                size_t ext_pos = name.find_last_of(".");
+                if (date_pos != std::string::npos && ext_pos != std::string::npos && date_pos < ext_pos) {
+                    std::string date_part = name.substr(date_pos + 1, ext_pos - date_pos - 1);
+                    // Format nicely for display
+                    if (date_part.length() >= 14) { // YYYYMMDD_HHMMSS format
+                        info.timestamp = date_part.substr(0, 8) + " " + 
+                                        date_part.substr(9, 2) + ":" + 
+                                        date_part.substr(11, 2) + ":" + 
+                                        date_part.substr(13, 2);
+                    } else {
+                        info.timestamp = date_part;
+                    }
+                }
+                
+                files.push_back(info);
+            }
+        }
+    } catch (const std::filesystem::filesystem_error& e) {
+        std::cerr << "❌ Error listing capture directory: " << e.what() << std::endl;
+    }
+    
+    // Sort by last modified time (newest first)
+    std::sort(files.begin(), files.end(), 
+             [](const CaptureInfo& a, const CaptureInfo& b) {
+                 return a.file_time > b.file_time;
+             });
+    
+    return files;
+}
+
+// --- Recent Captures UI Components ---
+class RecentCapturesPanel {
+public:
+    RecentCapturesPanel(MyWindow* parent_window) : parent_window_(parent_window) {
+        // Create UI components
+        box_.set_orientation(Gtk::ORIENTATION_VERTICAL);
+        
+        Gtk::Label* header_label = Gtk::manage(new Gtk::Label("Recent Captures:"));
+        header_label->set_xalign(0);
+        header_label->set_margin_bottom(5);
+        header_label->set_margin_top(10);
+        
+        files_box_.set_orientation(Gtk::ORIENTATION_HORIZONTAL);
+        files_box_.set_homogeneous(true);
+        files_box_.set_spacing(10);
+        
+        scrolled_window_.add(files_box_);
+        scrolled_window_.set_policy(Gtk::POLICY_AUTOMATIC, Gtk::POLICY_NEVER);
+        scrolled_window_.set_min_content_height(150);
+        
+        box_.pack_start(*header_label, false, false);
+        box_.pack_start(scrolled_window_, true, true);
+        
+        // Create Open Folder button
+        Gtk::Button* open_folder_button = Gtk::manage(new Gtk::Button("Open Captures Folder"));
+        open_folder_button->signal_clicked().connect(
+            sigc::mem_fun(*this, &RecentCapturesPanel::on_open_folder_clicked));
+            
+        Gtk::Box* button_box = Gtk::manage(new Gtk::Box(Gtk::ORIENTATION_HORIZONTAL));
+        button_box->pack_start(*open_folder_button, false, false);
+        button_box->set_margin_top(5);
+        
+        box_.pack_start(*button_box, false, false);
+        
+        // Load initial captures
+        refresh();
+    }
+    
+    Gtk::Box& get_box() {
+        return box_;
+    }
+    
+    void refresh() {
+        // Clear existing items
+        for (auto& widget : thumbnail_widgets_) {
+            files_box_.remove(*widget);
+            delete widget;
+        }
+        thumbnail_widgets_.clear();
+        capture_files_.clear();
+        
+        // Ensure captures directory exists
+        ensure_captures_directory();
+        
+        // Get list of capture files
+        capture_files_ = list_capture_files();
+        
+        // Sort files by modification time (newest first)
+        std::sort(capture_files_.begin(), capture_files_.end(), 
+            [](const std::string& a, const std::string& b) {
+                struct stat stat_a, stat_b;
+                stat(a.c_str(), &stat_a);
+                stat(b.c_str(), &stat_b);
+                return stat_a.st_mtime > stat_b.st_mtime;
+            });
+        
+        // Limit to the most recent 10 files
+        size_t max_files = 10;
+        if (capture_files_.size() > max_files) {
+            capture_files_.resize(max_files);
+        }
+        
+        // Add each thumbnail
+        for (const std::string& file_path : capture_files_) {
+            add_thumbnail(file_path);
+        }
+        
+        files_box_.show_all();
+    }
+
+private:
+    void add_thumbnail(const std::string& file_path) {
+        // Extract filename from path
+        size_t slash_pos = file_path.find_last_of('/');
+        std::string filename = (slash_pos != std::string::npos) ? 
+            file_path.substr(slash_pos + 1) : file_path;
+        
+        // Create a new thumbnail widget
+        Gtk::Box* thumbnail_box = Gtk::manage(new Gtk::Box(Gtk::ORIENTATION_VERTICAL));
+        thumbnail_box->set_border_width(5);
+        
+        // Create image widget
+        Gtk::Image* image = Gtk::manage(new Gtk::Image());
+        try {
+            Glib::RefPtr<Gdk::Pixbuf> pixbuf = Gdk::Pixbuf::create_from_file(file_path, 120, 90, true);
+            image->set(pixbuf);
+        } catch (const Glib::Exception& ex) {
+            std::cerr << "Error loading image: " << ex.what() << std::endl;
+            image->set_from_icon_name("image-missing", Gtk::ICON_SIZE_DIALOG);
+        }
+        
+        // Create a button with the image
+        Gtk::Button* image_button = Gtk::manage(new Gtk::Button());
+        image_button->set_image(*image);
+        image_button->set_tooltip_text(file_path);
+        image_button->signal_clicked().connect(
+            sigc::bind(sigc::mem_fun(*this, &RecentCapturesPanel::on_thumbnail_clicked), file_path));
+        
+        // Create label with filename
+        Gtk::Label* name_label = Gtk::manage(new Gtk::Label(filename));
+        name_label->set_ellipsize(Pango::ELLIPSIZE_MIDDLE);
+        name_label->set_max_width_chars(15);
+        
+        // Add to thumbnail box
+        thumbnail_box->pack_start(*image_button, false, false);
+        thumbnail_box->pack_start(*name_label, false, false);
+        
+        // Add to container
+        files_box_.pack_start(*thumbnail_box, false, false);
+        thumbnail_widgets_.push_back(thumbnail_box);
+    }
+    
+    void on_thumbnail_clicked(std::string file_path) {
+        // Open the image in the default viewer
+        std::string command = "xdg-open \"" + file_path + "\" &";
+        system(command.c_str());
+    }
+    
+    void on_open_folder_clicked() {
+        system("xdg-open captures &");
+    }
+    
+    std::vector<std::string> list_capture_files() {
+        std::vector<std::string> files;
+        DIR* dir = opendir("captures");
+        if (dir != nullptr) {
+            struct dirent* entry;
+            while ((entry = readdir(dir)) != nullptr) {
+                std::string filename = entry->d_name;
+                if (filename == "." || filename == "..") {
                     continue;
                 }
                 
-                windows.push_back(info);
-                std::cout << "  🪟 Window: \"" << info.title 
-                          << "\" Class: \"" << info.wm_class
-                          << "\" (" << info.width << "x" << info.height 
-                          << " at " << info.x << "," << info.y << ")" << std::endl;
+                // Check if it's an image file
+                if (filename.rfind(".png") != std::string::npos ||
+                    filename.rfind(".jpg") != std::string::npos ||
+                    filename.rfind(".jpeg") != std::string::npos) {
+                    files.push_back("captures/" + filename);
+                }
             }
+            closedir(dir);
         }
-        
-        // Free the children list
-        if (children) {
-            XFree(children);
-        }
-        
-        return windows;
+        return files;
     }
     
-    // Capture a specific window with improved methods for Wayland compatibility
-    bool capture_window(const WindowInfo& window, const std::string& output_filename) {
-        if (!display_) {
-            std::cerr << "❌ X11 display not initialized" << std::endl;
-            return false;
-        }
-        
-        std::cout << "🔍 Attempting to capture window: \"" << window.title 
-                  << "\" Class: \"" << window.wm_class
-                  << "\" (" << window.width << "x" << window.height << ")" << std::endl;
-        
-        try {
-            // Create a pixmap to draw into
-            int depth = DefaultDepth(display_, DefaultScreen(display_));
-            if (pixmap_) {
-                XFreePixmap(display_, pixmap_);
-            }
-            pixmap_ = XCreatePixmap(display_, root_, window.width, window.height, depth);
-            
-            // Create a graphics context
-            GC gc = XCreateGC(display_, pixmap_, 0, nullptr);
-            
-            // Fill with a pattern to detect if copying worked
-            XSetForeground(display_, gc, 0x000000FF); // Blue background to detect successful copies
-            XFillRectangle(display_, pixmap_, gc, 0, 0, window.width, window.height);
-            
-            // Make sure the window is mapped and viewable
-            XWindowAttributes attr;
-            if (XGetWindowAttributes(display_, window.id, &attr) && attr.map_state == IsViewable) {
-                // Try multiple capture methods
-                XImage* image = nullptr;
-                bool capture_success = false;
-                
-                // Method 1: Try XComposite first - works better with Wayland XWayland windows
-                int composite_event_base, composite_error_base;
-                if (XCompositeQueryExtension(display_, &composite_event_base, &composite_error_base)) {
-                    std::cout << "  🧩 Trying XComposite capture method..." << std::endl;
-                    
-                    try {
-                        // Use XComposite to get a window pixmap
-                        XCompositeRedirectWindow(display_, window.id, CompositeRedirectAutomatic);
-                        XSync(display_, False);
-                        
-                        Pixmap window_pixmap = XCompositeNameWindowPixmap(display_, window.id);
-                        
-                        if (window_pixmap) {
-                            // Try to copy from the window pixmap
-                            XCopyArea(display_, window_pixmap, pixmap_, gc, 
-                                    0, 0, window.width, window.height, 0, 0);
-                            
-                            XFreePixmap(display_, window_pixmap);
-                            
-                            // Get the image
-                            image = XGetImage(display_, pixmap_, 
-                                            0, 0, window.width, window.height, 
-                                            AllPlanes, ZPixmap);
-                            
-                            // Check if the capture worked (not all blue)
-                            if (image && !is_image_solid_color(image, 0x000000FF)) {
-                                capture_success = true;
-                                std::cout << "  ✅ XComposite capture succeeded!" << std::endl;
-                            } else if (image) {
-                                std::cout << "  ❌ XComposite returned blank or solid color image" << std::endl;
-                                XDestroyImage(image);
-                                image = nullptr;
-                            }
-                        }
-                        
-                        // Clean up
-                        XCompositeUnredirectWindow(display_, window.id, CompositeRedirectAutomatic);
-                        XSync(display_, False);
-                    } catch (...) {
-                        std::cerr << "  ⚠️ Exception in XComposite capture, trying next method" << std::endl;
-                        XCompositeUnredirectWindow(display_, window.id, CompositeRedirectAutomatic);
-                        XSync(display_, False);
-                    }
-                }
-                
-                // Method 2: Standard XCopyArea if XComposite failed
-                if (!capture_success) {
-                    std::cout << "  🔄 Trying standard XCopyArea method..." << std::endl;
-                    
-                    // Fill pixmap with pattern again
-                    XSetForeground(display_, gc, 0x0000FF00); // Green background
-                    XFillRectangle(display_, pixmap_, gc, 0, 0, window.width, window.height);
-                    
-                    // Copy window to pixmap
-                    XCopyArea(display_, window.id, pixmap_, gc, 
-                            0, 0, window.width, window.height, 0, 0);
-                    
-                    // Get the image
-                    if (image) {
-                        XDestroyImage(image);
-                    }
-                    image = XGetImage(display_, pixmap_, 
-                                     0, 0, window.width, window.height, 
-                                     AllPlanes, ZPixmap);
-                    
-                    // Check if capture worked
-                    if (image && !is_image_solid_color(image, 0x0000FF00)) {
-                        capture_success = true;
-                        std::cout << "  ✅ XCopyArea capture succeeded!" << std::endl;
-                    } else if (image) {
-                        std::cout << "  ❌ XCopyArea returned blank or solid color image" << std::endl;
-                        XDestroyImage(image);
-                        image = nullptr;
-                    }
-                }
-                
-                // Method 3: Direct XGetImage as a last resort
-                if (!capture_success) {
-                    std::cout << "  🔄 Trying direct XGetImage method..." << std::endl;
-                    
-                    if (image) {
-                        XDestroyImage(image);
-                    }
-                    
-                    // Try direct capture from window
-                    try {
-                        image = XGetImage(display_, window.id, 
-                                        0, 0, window.width, window.height, 
-                                        AllPlanes, ZPixmap);
-                        
-                        if (image && !is_image_all_black(image)) {
-                            capture_success = true;
-                            std::cout << "  ✅ Direct XGetImage capture succeeded!" << std::endl;
-                        } else if (image) {
-                            std::cout << "  ❌ Direct XGetImage returned black or empty image" << std::endl;
-                            XDestroyImage(image);
-                            image = nullptr;
-                        }
-                    } catch (...) {
-                        std::cerr << "  ⚠️ Exception in direct XGetImage capture" << std::endl;
-                    }
-                }
-                
-                // Check final capture result
-                if (!image) {
-                    std::cerr << "❌ All capture methods failed" << std::endl;
-                    XFreeGC(display_, gc);
-                    return false;
-                }
-                
-                std::cout << "📸 Window captured successfully: " << window.width << "x" << window.height 
-                          << " with depth " << image->depth << std::endl;
-                
-                // Save the image to a file
-                bool save_result = save_image_as_png(image, output_filename);
-                
-                // Clean up
-                XDestroyImage(image);
-                XFreeGC(display_, gc);
-                
-                return save_result;
-            } else {
-                std::cerr << "❌ Window is not viewable" << std::endl;
-                XFreeGC(display_, gc);
-                return false;
-            }
-        } catch (const std::exception& e) {
-            std::cerr << "❌ Exception during window capture: " << e.what() << std::endl;
-            return false;
-        } catch (...) {
-            std::cerr << "❌ Unknown exception during window capture" << std::endl;
-            return false;
-        }
-    }
-    
-    // Save XImage as PNG file
-    bool save_image_as_png(XImage* image, const std::string& filename) {
-        if (!image) {
-            std::cerr << "❌ No image to save" << std::endl;
-            return false;
-        }
-        
-        // Create a Cairo surface from the XImage data
-        cairo_surface_t* surface = cairo_image_surface_create(
-            CAIRO_FORMAT_ARGB32, 
-            image->width, 
-            image->height
-        );
-        
-        if (cairo_surface_status(surface) != CAIRO_STATUS_SUCCESS) {
-            std::cerr << "❌ Failed to create Cairo surface" << std::endl;
-            return false;
-        }
-        
-        // Get the surface data to copy pixels into
-        unsigned char* surface_data = cairo_image_surface_get_data(surface);
-        int stride = cairo_image_surface_get_stride(surface);
-        
-        // This assumes 24-bit (RGB) or 32-bit (RGBA) XImage
-        if (image->depth == 24 || image->depth == 32) {
-            // Lock the surface for writing
-            cairo_surface_flush(surface);
-            
-            // Copy the image data with pixel format conversion
-            for (int y = 0; y < image->height; y++) {
-                for (int x = 0; x < image->width; x++) {
-                    unsigned long pixel = XGetPixel(image, x, y);
-                    int index = y * stride + x * 4;
-                    
-                    // BGR to ARGB conversion
-                    surface_data[index + 0] = (pixel & 0x000000FF) >> 0;  // Blue
-                    surface_data[index + 1] = (pixel & 0x0000FF00) >> 8;  // Green
-                    surface_data[index + 2] = (pixel & 0x00FF0000) >> 16; // Red
-                    surface_data[index + 3] = 0xFF;                       // Alpha (fully opaque)
-                }
-            }
-            
-            // Mark the surface as modified
-            cairo_surface_mark_dirty(surface);
-            
-            // Determine the file type based on extension
-            if (filename.find(".jpg") != std::string::npos || 
-                filename.find(".jpeg") != std::string::npos) {
-                // Save as JPEG (note: cairo doesn't have native JPEG support)
-                // Fall back to PNG for now
-                std::cout << "⚠️ JPEG format requested, but falling back to PNG (Cairo limitation)" << std::endl;
-                cairo_status_t status = cairo_surface_write_to_png(surface, filename.c_str());
-                
-                if (status != CAIRO_STATUS_SUCCESS) {
-                    std::cerr << "❌ Failed to save image: " << cairo_status_to_string(status) << std::endl;
-                    cairo_surface_destroy(surface);
-                    return false;
-                }
-            } else {
-                // Save as PNG
-                cairo_status_t status = cairo_surface_write_to_png(surface, filename.c_str());
-                
-                if (status != CAIRO_STATUS_SUCCESS) {
-                    std::cerr << "❌ Failed to save image: " << cairo_status_to_string(status) << std::endl;
-                    cairo_surface_destroy(surface);
-                    return false;
-                }
-            }
-            
-            std::cout << "💾 Image saved successfully to: " << filename << std::endl;
-            cairo_surface_destroy(surface);
-            return true;
-        } else {
-            std::cerr << "❌ Unsupported image depth: " << image->depth << std::endl;
-            cairo_surface_destroy(surface);
-            return false;
-        }
-    }
-
-    // Add method to get root window info for full screen capture
-    WindowInfo get_root_window_info() {
-        WindowInfo root_info;
-        root_info.id = root_;
-        root_info.title = "Full Screen";
-        root_info.wm_class = "Screen";
-        root_info.width = width_;
-        root_info.height = height_;
-        root_info.x = 0;
-        root_info.y = 0;
-        root_info.visible = true;
-        root_info.has_wm_class = true;
-        return root_info;
-    }
-    
-private:
-    Display* display_;
-    int width_;
-    int height_;
-    Window root_;
-    Pixmap pixmap_;
-    
-    // Check if an image is all black
-    bool is_image_all_black(XImage* image) {
-        if (!image) return true;
-        
-        const int sample_step = std::max(1, std::min(image->width, image->height) / 20);
-        
-        for (int y = 0; y < image->height; y += sample_step) {
-            for (int x = 0; x < image->width; x += sample_step) {
-                unsigned long pixel = XGetPixel(image, x, y);
-                if (pixel != 0) {
-                    return false;
-                }
-            }
-        }
-        return true;
-    }
-    
-    // Check if an image is a solid color
-    bool is_image_solid_color(XImage* image, unsigned long color) {
-        if (!image) return true;
-        
-        const int sample_step = std::max(1, std::min(image->width, image->height) / 20);
-        int different_count = 0;
-        
-        for (int y = 0; y < image->height; y += sample_step) {
-            for (int x = 0; x < image->width; x += sample_step) {
-                unsigned long pixel = XGetPixel(image, x, y);
-                if (pixel != color) {
-                    different_count++;
-                    if (different_count > 5) {  // Allow a few different pixels for noise
-                        return false;
-                    }
-                }
-            }
-        }
-        return true;
-    }
-    
-    // Get comprehensive information about a window
-    WindowInfo get_window_info(Window window) {
-        WindowInfo info;
-        info.id = window;
-        info.visible = false;
-        info.has_wm_class = false;
-        
-        // Get window attributes
-        XWindowAttributes attrs;
-        Status status = XGetWindowAttributes(display_, window, &attrs);
-        
-        if (status == 0) {
-            return info;
-        }
-        
-        // Get window geometry
-        info.x = attrs.x;
-        info.y = attrs.y;
-        info.width = attrs.width;
-        info.height = attrs.height;
-        
-        // Check if window is visible
-        info.visible = (attrs.map_state == IsViewable);
-        
-        // Get window name using EWMH _NET_WM_NAME (UTF-8 title)
-        Atom net_wm_name = XInternAtom(display_, "_NET_WM_NAME", False);
-        Atom utf8_string = XInternAtom(display_, "UTF8_STRING", False);
-        Atom actual_type_return;
-        int actual_format_return;
-        unsigned long nitems_return;
-        unsigned long bytes_after_return;
-        unsigned char *prop_return = nullptr;
-        
-        if (XGetWindowProperty(display_, window, net_wm_name, 0, 1024, False, utf8_string,
-                              &actual_type_return, &actual_format_return, &nitems_return,
-                              &bytes_after_return, &prop_return) == Success && 
-            prop_return != nullptr) {
-            
-            info.title = reinterpret_cast<char*>(prop_return);
-            XFree(prop_return);
-        } else {
-            // Fall back to WM_NAME
-            char* window_name = nullptr;
-            if (XFetchName(display_, window, &window_name) && window_name) {
-                info.title = window_name;
-                XFree(window_name);
-            } else {
-                // Try to get WM_NAME property as another fallback
-                XTextProperty text_prop;
-                if (XGetWMName(display_, window, &text_prop) && text_prop.value) {
-                    info.title = reinterpret_cast<char*>(text_prop.value);
-                    XFree(text_prop.value);
-                } else {
-                    info.title = "";
-                }
-            }
-        }
-        
-        // Get window class (helps identify applications like terminals)
-        XClassHint class_hint;
-        if (XGetClassHint(display_, window, &class_hint)) {
-            info.has_wm_class = true;
-            if (class_hint.res_name) {
-                info.wm_class = class_hint.res_name;
-                XFree(class_hint.res_name);
-            }
-            if (class_hint.res_class) {
-                if (!info.wm_class.empty()) {
-                    info.wm_class += ".";
-                }
-                info.wm_class += class_hint.res_class;
-                XFree(class_hint.res_class);
-            }
-        } else {
-            info.wm_class = "";
-        }
-        
-        return info;
-    }
-
-    // Detect and identify duplicate windows (decorated vs undecorated)
-    std::vector<WindowInfo> detect_window_duplicates(std::vector<WindowInfo>& windows) {
-        std::vector<WindowInfo> filtered_windows;
-        std::map<std::string, std::vector<WindowInfo*>> title_groups;
-        
-        // First, group windows by title
-        for (auto& window : windows) {
-            // Skip windows with empty titles or mutter guard windows
-            if (window.title.empty() || 
-                window.title.find("mutter") != std::string::npos ||
-                window.wm_class.find("mutter") != std::string::npos) {
-                continue;
-            }
-            
-            title_groups[window.title].push_back(&window);
-        }
-        
-        // Process each group of windows with the same title
-        for (auto& [title, group] : title_groups) {
-            if (group.size() == 1) {
-                // Only one window with this title, add it as is
-                group[0]->window_type = "normal";
-                filtered_windows.push_back(*group[0]);
-            } else {
-                // Multiple windows with same title - likely decorated and undecorated versions
-                // Sort by size (usually decorated is larger)
-                std::sort(group.begin(), group.end(), 
-                    [](const WindowInfo* a, const WindowInfo* b) {
-                        return (a->width * a->height) > (b->width * b->height);
-                    });
-                
-                // Check if they look like decorated/undecorated pairs
-                if (group.size() == 2) {
-                    WindowInfo* larger = group[0];
-                    WindowInfo* smaller = group[1];
-                    
-                    // If the larger window contains the smaller window, they're likely decorated/undecorated versions
-                    if (larger->x <= smaller->x && larger->y <= smaller->y &&
-                        larger->x + larger->width >= smaller->x + smaller->width &&
-                        larger->y + larger->height >= smaller->y + smaller->height) {
-                        
-                        // Mark the windows appropriately
-                        larger->window_type = "decorated";
-                        larger->has_decorations = true;
-                        smaller->window_type = "undecorated";
-                        smaller->has_decorations = false;
-                        
-                        // Add both to the filtered list
-                        filtered_windows.push_back(*larger);
-                        filtered_windows.push_back(*smaller);
-                    } else {
-                        // Can't determine if they're related, add both with generic labels
-                        for (auto* window : group) {
-                            window->window_type = "unknown";
-                            filtered_windows.push_back(*window);
-                        }
-                    }
-                } else {
-                    // More than 2 windows with same title, add all with index
-                    for (size_t i = 0; i < group.size(); i++) {
-                        group[i]->window_type = "variant_" + std::to_string(i+1);
-                        filtered_windows.push_back(*group[i]);
-                    }
-                }
-            }
-        }
-        
-        return filtered_windows;
-    }
+    Gtk::Box box_;
+    Gtk::ScrolledWindow scrolled_window_;
+    Gtk::Box files_box_;
+    std::vector<Gtk::Widget*> thumbnail_widgets_;
+    std::vector<std::string> capture_files_;
+    MyWindow* parent_window_;
 };
 
-// --- PipeWrench Class Definition ---
-class PipeWrench {
-public:
-    PipeWrench();
-    void handle_create_session_response(const Glib::RefPtr<Gio::AsyncResult>& result);
-    void handle_request_response(const Glib::VariantContainerBase& parameters);
-    void select_sources();
-    void start_session();
-    void open_pipewire_remote();
-    void cleanup();
-    
-    // Add direct X11 capture alternative
-    bool try_direct_capture();
-
-    Glib::RefPtr<Gio::DBus::Proxy> portal_proxy_;
-    Glib::ustring session_handle_token_;
-
-private:
-    Glib::RefPtr<Gio::DBus::Proxy> session_proxy_;
-    Glib::RefPtr<Gio::DBus::Connection> dbus_connection_;
-    Glib::ustring session_handle_;
-    void subscribe_to_session_signal();
-    void install_raw_signal_listener();
-    
-    // Add X11 capturer
-    X11ScreenCapturer x11_capturer_;
-};
-
-// --- PipeWrench Member Function Implementations ---
-PipeWrench::PipeWrench() {
-    try {
-        // Get the session bus
-        dbus_connection_ = Gio::DBus::Connection::get_sync(Gio::DBus::BUS_TYPE_SESSION);
-        
-        // Verify the connection
-        if (!dbus_connection_) {
-            std::cerr << "❌ Failed to connect to session bus" << std::endl;
-            return;
-        }
-        
-        // Create the portal proxy
-        portal_proxy_ = Gio::DBus::Proxy::create_sync(
-            dbus_connection_,
-            "org.freedesktop.portal.Desktop",
-            "/org/freedesktop/portal/desktop",
-            "org.freedesktop.portal.ScreenCast");
-        
-        if (!portal_proxy_) {
-            std::cerr << "❌ Failed to create portal proxy" << std::endl;
-            return;
-        }
-        
-        std::cout << "🎯 Portal proxy created successfully." << std::endl;
-        
-        // Check if the ScreenCast interface is available via introspection
-        try {
-            // Create an empty parameters tuple more explicitly
-            std::vector<Glib::VariantBase> empty_params;
-            auto var_params = Glib::VariantContainerBase::create_tuple(empty_params);
-            
-            auto introspection = dbus_connection_->call_sync(
-                "/org/freedesktop/portal/desktop", 
-                "org.freedesktop.DBus.Introspectable", 
-                "Introspect",
-                var_params,
-                "org.freedesktop.portal.Desktop");
-            
-            Glib::Variant<Glib::ustring> xml_data;
-            introspection.get_child(xml_data);
-            Glib::ustring xml = xml_data.get();
-            
-            if (xml.find("org.freedesktop.portal.ScreenCast") != Glib::ustring::npos) {
-                std::cout << "✅ ScreenCast interface is available" << std::endl;
-            } else {
-                std::cerr << "⚠️ ScreenCast interface is NOT available in the introspection data" << std::endl;
-            }
-        } catch (const Glib::Error& e) {
-            std::cerr << "⚠️ Error introspecting portal: " << e.what() << std::endl;
-        }
-        
-        install_raw_signal_listener();
-    } catch (const Glib::Error& e) {
-        std::cerr << "❌ Error initializing PipeWrench: " << e.what() << std::endl;
-    }
-}
-
-void PipeWrench::install_raw_signal_listener() {
-    std::cout << "📻 Installing raw signal listener on session path wildcard..." << std::endl;
-    g_dbus_connection_signal_subscribe(
-        dbus_connection_->gobj(),
-        "org.freedesktop.portal.Desktop",
-        "org.freedesktop.portal.Session",
-        "Response",
-        nullptr, // match all paths
-        nullptr, // match all arg0
-        G_DBUS_SIGNAL_FLAGS_NONE,
-        [](GDBusConnection* connection,
-           const gchar* sender_name,
-           const gchar* object_path,
-           const gchar* interface_name,
-           const gchar* signal_name,
-           GVariant* parameters,
-           gpointer user_data) {
-            std::cout << "📡 GDBus Signal Caught:" << std::endl;
-            std::cout << "   Sender:   " << sender_name << std::endl;
-            std::cout << "   Path:     " << object_path << std::endl;
-            std::cout << "   Interface:" << interface_name << std::endl;
-            std::cout << "   Signal:   " << signal_name << std::endl;
-
-            gchar* debug_str = g_variant_print(parameters, TRUE);
-            std::cout << "   Params:   " << debug_str << std::endl;
-            g_free(debug_str);
-        },
-        nullptr,
-        nullptr);
-}
-
-void PipeWrench::cleanup() {
-    std::cerr << "🧹 Cleaning up resources." << std::endl;
-}
-
-void PipeWrench::select_sources() {
-    std::cout << "🖼️ select_sources() called." << std::endl;
-}
-
-void PipeWrench::start_session() {
-    std::cout << "▶️ start_session() called." << std::endl;
-}
-
-void PipeWrench::open_pipewire_remote() {
-    std::cout << "📡 open_pipewire_remote() called." << std::endl;
-}
-
-void PipeWrench::subscribe_to_session_signal() {
-    std::cout << "📶 subscribe_to_session_signal() called." << std::endl;
-}
-
-void PipeWrench::handle_create_session_response(const Glib::RefPtr<Gio::AsyncResult>& result) {
-    std::cout << "🔔 Entered handle_create_session_response" << std::endl;
-    try {
-        auto reply = portal_proxy_->call_finish(result);
-        std::cout << "✔️ Call finished, processing variant..." << std::endl;
-
-        if (reply.get_n_children() == 0) {
-            std::cerr << "⚠️ No children in reply variant." << std::endl;
-            cleanup();
-            return;
-        }
-
-        auto variant_base = reply.get_child(0);
-        std::cout << "📥 Raw variant received: " << variant_base.print() << std::endl;
-
-        if (!variant_base.is_container()) {
-            std::cerr << "⚠️ Variant is not a container. Type: " << variant_base.get_type_string() << std::endl;
-            cleanup();
-            return;
-        }
-
-        using TupleType = std::tuple<uint32_t, std::map<Glib::ustring, Glib::VariantBase>>;
-        auto typed_variant = Glib::VariantBase::cast_dynamic<Glib::Variant<TupleType>>(variant_base);
-        auto tuple = typed_variant.get();
-        auto response_map = std::get<1>(tuple);
-
-        std::cout << "🧵 Parsed session response map with keys:";
-        for (const auto& [k, v] : response_map) {
-            std::cout << "\n  [" << k << "] => " << v.print();
-        }
-        std::cout << std::endl;
-
-        std::cout << "🔖 Session token used: " << session_handle_token_ << std::endl;
-
-        GVariantBuilder dict_builder;
-        g_variant_builder_init(&dict_builder, G_VARIANT_TYPE_VARDICT);
-        for (const auto& [key, val] : response_map) {
-            std::cout << "🧩 Adding to builder: " << key << " => " << val.print() << std::endl;
-            g_variant_builder_add(&dict_builder, "{sv}", key.c_str(), const_cast<GVariant*>(val.gobj()));
-        }
-
-        GVariant* raw_variant = g_variant_builder_end(&dict_builder);
-        Glib::VariantContainerBase container = wrap_variant(raw_variant);
-        std::cout << "✔️ Wrapped variant container created. Forwarding to request handler." << std::endl;
-
-        handle_request_response(container);
-
-    } catch (const Glib::Error& ex) {
-        std::cerr << "💥 Exception in CreateSession handler: " << ex.what() << std::endl;
-        cleanup();
-    } catch (const std::exception& ex) {
-        std::cerr << "💣 STD exception: " << ex.what() << std::endl;
-        cleanup();
-    }
-}
-
-void PipeWrench::handle_request_response(const Glib::VariantContainerBase& parameters) {
-    std::cout << "🔔 handle_request_response called — parsing parameters..." << std::endl;
-
-    try {
-        auto session_variant = Glib::VariantBase::cast_dynamic<Glib::Variant<std::map<Glib::ustring, Glib::VariantBase>>>(parameters);
-        auto response_map = session_variant.get();
-
-        std::cout << "📨 Response Map Parsed:" << std::endl;
-        for (const auto& [key, val] : response_map) {
-            std::cout << "  [" << key << "] => " << val.print() << std::endl;
-        }
-
-        auto it = response_map.find("session_handle");
-        if (it != response_map.end()) {
-            session_handle_ = Glib::VariantBase::cast_dynamic<Glib::Variant<Glib::ustring>>(it->second).get();
-            std::cout << "✅ session_handle was found in response map." << std::endl;
-        } else {
-            std::cerr << "⚠️ Missing session_handle in response. Reconstructing manually." << std::endl;
-            session_handle_ = "/org/freedesktop/portal/desktop/session/1_0/" + session_handle_token_;
-        }
-        std::cout << "🔗 Session handle resolved as: " << session_handle_ << std::endl;
-
-        subscribe_to_session_signal();
-        select_sources();
-        start_session();
-        open_pipewire_remote();
-    } catch (const Glib::Error& e) {
-        std::cerr << "🚨 handle_request_response error: " << e.what() << std::endl;
-        cleanup();
-    }
-}
-
-// Add direct capture method
-bool PipeWrench::try_direct_capture() {
-    std::cout << "🎬 Attempting direct X11 screen capture..." << std::endl;
-    
-    // Create a test window info for capturing the entire screen
-    X11ScreenCapturer::WindowInfo root_window = x11_capturer_.get_root_window_info();
-    
-    // Generate a filename with timestamp
-    time_t now = time(nullptr);
-    struct tm timeinfo;
-    localtime_r(&now, &timeinfo);
-    char timestamp[20];
-    strftime(timestamp, sizeof(timestamp), "%Y%m%d_%H%M%S", &timeinfo);
-    
-    // Capture the screen to a file
-    std::string filename = "captures/screen_" + std::string(timestamp) + ".png";
-    return x11_capturer_.capture_window(root_window, filename);
-}
-
-// --- MyWindow Class Definition (Needs to be before main) ---
+// --- MyWindow Class Definition ---
 class MyWindow : public Gtk::Window {
 public:
-    MyWindow() : window_capturer(), box(Gtk::ORIENTATION_VERTICAL, 5) {
+    MyWindow() : window_capturer(), box(Gtk::ORIENTATION_VERTICAL, 5), recent_captures_panel(this) {
         set_title("PipeWrench - Window Capture Tool");
         set_default_size(700, 500);
         set_border_width(10);
         
         // Create the top label
-        Gtk::Label* header_label = Gtk::manage(new Gtk::Label("Select a window to capture:"));
+        Gtk::Label* header_label = Gtk::manage(new Gtk::Label("Select a window or screen to capture:"));
         header_label->set_xalign(0);
         header_label->set_margin_bottom(5);
         
@@ -1040,7 +775,7 @@ public:
         tree_view.set_model(list_store);
         
         // Add columns to the tree view
-        tree_view.append_column("Window ID", columns.col_id);
+        tree_view.append_column("ID", columns.col_id);
         tree_view.append_column("Title", columns.col_title);
         tree_view.append_column("Type", columns.col_window_type);
         tree_view.append_column("Dimensions", columns.col_dimensions);
@@ -1059,24 +794,40 @@ public:
             }
         }
         
+        // Create source selection
+        Gtk::Box* source_box = Gtk::manage(new Gtk::Box(Gtk::ORIENTATION_HORIZONTAL, 10));
+        Gtk::Label* source_label = Gtk::manage(new Gtk::Label("Source Type:"));
+        source_combo.append("window", "Windows");
+        source_combo.append("screen", "Screens");
+        source_combo.append("all", "All Sources");
+        source_combo.set_active_id("window");
+        source_combo.signal_changed().connect(
+            sigc::mem_fun(*this, &MyWindow::on_source_changed));
+        source_box->pack_start(*source_label, false, false);
+        source_box->pack_start(source_combo, false, false);
+        
         // Create checkbox for window decorations
         decorations_check.set_label("Include window decorations");
         decorations_check.set_active(false);
+        source_box->pack_start(decorations_check, false, false);
+        
+        // Create debug checkbox
+        debug_check.set_label("Show Diagnostic Info");
+        debug_check.set_active(false);
+        debug_check.signal_toggled().connect(
+            sigc::mem_fun(*this, &MyWindow::on_debug_toggled));
+        source_box->pack_start(debug_check, false, false);
         
         // Create action buttons
-        refresh_button.set_label("Refresh Window List");
-        capture_button.set_label("Capture Selected Window");
+        refresh_button.set_label("Refresh List");
+        capture_button.set_label("Capture Selected");
         capture_button.set_sensitive(false); // Disabled until a window is selected
         
         // Create format selection
-        format_label.set_text("Output Format:");
+        format_label.set_text("Format:");
         format_combo.append("png", "PNG");
         format_combo.append("jpg", "JPEG");
         format_combo.set_active_id("png");
-        
-        // Create options box
-        Gtk::Box* options_box = Gtk::manage(new Gtk::Box(Gtk::ORIENTATION_HORIZONTAL, 10));
-        options_box->pack_start(decorations_check, false, false);
         
         // Create button box for controls
         Gtk::Box* controls_box = Gtk::manage(new Gtk::Box(Gtk::ORIENTATION_HORIZONTAL, 10));
@@ -1086,13 +837,24 @@ public:
         controls_box->pack_end(format_label, false, false);
         
         // Create status bar
-        status_bar.push("Ready. No window selected.");
+        status_bar.push("Ready. No item selected.");
+        
+        // Setup debug text view
+        debug_window.set_policy(Gtk::POLICY_AUTOMATIC, Gtk::POLICY_AUTOMATIC);
+        debug_window.add(debug_view);
+        debug_window.set_min_content_height(100);
+        debug_buffer = debug_view.get_buffer();
+        debug_view.set_editable(false);
+        debug_view.set_monospace(true);
+        debug_window.set_no_show_all(true); // Hidden by default
         
         // Pack all widgets into the main box
         box.pack_start(*header_label, false, false);
+        box.pack_start(*source_box, false, false);
         box.pack_start(scrolled_window, true, true);
-        box.pack_start(*options_box, false, false);
         box.pack_start(*controls_box, false, false);
+        box.pack_start(debug_window, true, true);
+        box.pack_start(recent_captures_panel.get_box(), true, true);
         box.pack_start(status_bar, false, false);
         
         // Add the box to the window
@@ -1119,24 +881,47 @@ public:
         show_all_children();
         
         // Populate window list initially
-        populate_window_list();
+        populate_list();
+        
+        // Redirect cout to our debug window
+        cout_buffer = std::cout.rdbuf();
+        debug_streambuf = new DebugStreambuf(this);
+        std::cout.rdbuf(debug_streambuf);
         
         std::cout << "  MyWindow constructor finished." << std::endl;
     }
     
     virtual ~MyWindow() {
+        // Restore stdout
+        std::cout.rdbuf(cout_buffer);
+        delete debug_streambuf;
+        
         std::cout << "  MyWindow destructor called." << std::endl;
     }
 
 protected:
     // Signal handlers
     void on_refresh_clicked() {
-        populate_window_list();
-        status_bar.push("Window list refreshed.");
+        populate_list();
+        recent_captures_panel.refresh();
+        status_bar.push("List refreshed.");
+    }
+    
+    void on_source_changed() {
+        populate_list();
+        status_bar.push("Source type changed to: " + source_combo.get_active_text());
+    }
+    
+    void on_debug_toggled() {
+        if (debug_check.get_active()) {
+            debug_window.show();
+        } else {
+            debug_window.hide();
+        }
     }
     
     void on_decorations_toggled() {
-        populate_window_list();
+        populate_list();
         status_bar.push("Window decoration preference updated.");
     }
     
@@ -1145,18 +930,14 @@ protected:
         Gtk::TreeModel::iterator iter = selection->get_selected();
         
         if (!iter) {
-            status_bar.push("No window selected for capture.");
+            status_bar.push("No item selected for capture.");
             return;
         }
         
-        // Get the window info pointer from the selected row
+        // Get the selected row
         Gtk::TreeModel::Row row = *iter;
-        X11ScreenCapturer::WindowInfo* window_info = row[columns.col_window_info_ptr];
-        
-        if (!window_info) {
-            status_bar.push("Invalid window information.");
-            return;
-        }
+        Glib::ustring item_type_ustr = row[columns.col_item_type];
+        std::string item_type = item_type_ustr.raw();
         
         // Ensure captures directory exists
         if (!ensure_captures_directory()) {
@@ -1172,15 +953,59 @@ protected:
         strftime(timestamp, sizeof(timestamp), "%Y%m%d_%H%M%S", &timeinfo);
         
         std::string format = format_combo.get_active_id();
-        std::string filename = "captures/window_" + std::string(timestamp) + "." + format;
         
-        // Attempt to capture the window
-        status_bar.push("Capturing window: " + window_info->title);
-        
-        if (window_capturer.capture_window(*window_info, filename)) {
-            status_bar.push("Window captured successfully: " + filename);
-        } else {
-            status_bar.push("Failed to capture window.");
+        if (item_type == "window") {
+            // Handle window capture
+            X11ScreenCapturer::WindowInfo* window_info = row[columns.col_window_info_ptr];
+            if (!window_info) {
+                status_bar.push("Invalid window information.");
+                return;
+            }
+            
+            std::string filename = "captures/window_" + std::string(timestamp) + "." + format;
+            status_bar.push("Capturing window: " + window_info->title);
+            
+            if (format == "jpg") {
+                if (save_image_as_jpeg(window_capturer.capture_window_image(*window_info), filename)) {
+                    status_bar.push("Window captured successfully: " + filename);
+                    recent_captures_panel.refresh();
+                } else {
+                    status_bar.push("Failed to capture window.");
+                }
+            } else {
+                if (window_capturer.capture_window(*window_info, filename)) {
+                    status_bar.push("Window captured successfully: " + filename);
+                    recent_captures_panel.refresh();
+                } else {
+                    status_bar.push("Failed to capture window.");
+                }
+            }
+        } else if (item_type == "screen") {
+            // Handle screen capture
+            X11ScreenCapturer::ScreenInfo* screen_info = row[columns.col_screen_info_ptr];
+            if (!screen_info) {
+                status_bar.push("Invalid screen information.");
+                return;
+            }
+            
+            std::string filename = "captures/screen_" + std::string(timestamp) + "." + format;
+            status_bar.push("Capturing screen: " + screen_info->name);
+            
+            if (format == "jpg") {
+                if (save_image_as_jpeg(window_capturer.capture_screen_image(screen_info->number), filename)) {
+                    status_bar.push("Screen captured successfully: " + filename);
+                    recent_captures_panel.refresh();
+                } else {
+                    status_bar.push("Failed to capture screen.");
+                }
+            } else {
+                if (window_capturer.capture_screen(screen_info->number, filename)) {
+                    status_bar.push("Screen captured successfully: " + filename);
+                    recent_captures_panel.refresh();
+                } else {
+                    status_bar.push("Failed to capture screen.");
+                }
+            }
         }
     }
     
@@ -1190,100 +1015,156 @@ protected:
         
         if (iter) {
             Gtk::TreeModel::Row row = *iter;
-            Glib::ustring window_title = row[columns.col_title];
-            Glib::ustring window_type = row[columns.col_window_type];
-            status_bar.push("Selected: " + window_title + " (" + window_type + ")");
+            Glib::ustring item_title = row[columns.col_title];
+            Glib::ustring item_type = row[columns.col_item_type];
+            status_bar.push("Selected: " + item_title + " (" + item_type + ")");
             capture_button.set_sensitive(true);
         } else {
-            status_bar.push("No window selected.");
+            status_bar.push("No item selected.");
             capture_button.set_sensitive(false);
         }
     }
     
     void on_row_activated(const Gtk::TreeModel::Path& path, Gtk::TreeViewColumn* column) {
-        Gtk::TreeModel::iterator iter = list_store->get_iter(path);
-        if (!iter) {
-            status_bar.push("Invalid row activated.");
-            return;
-        }
-        
-        Gtk::TreeModel::Row row = *iter;
-        X11ScreenCapturer::WindowInfo* window_info = row[columns.col_window_info_ptr];
-        
-        if (!window_info) {
-            status_bar.push("Invalid window information.");
-            return;
-        }
-        
-        // Ensure captures directory exists
-        if (!ensure_captures_directory()) {
-            status_bar.push("Failed to ensure captures directory exists.");
-            return;
-        }
-        
-        // Generate a filename with timestamp
-        time_t now = time(nullptr);
-        struct tm timeinfo;
-        localtime_r(&now, &timeinfo);
-        char timestamp[20];
-        strftime(timestamp, sizeof(timestamp), "%Y%m%d_%H%M%S", &timeinfo);
-        
-        std::string format = format_combo.get_active_id();
-        std::string filename = "captures/window_" + std::string(timestamp) + "." + format;
-        
-        // Attempt to capture the window
-        status_bar.push("Capturing window: " + window_info->title);
-        
-        if (window_capturer.capture_window(*window_info, filename)) {
-            status_bar.push("Window captured successfully: " + filename);
-        } else {
-            status_bar.push("Failed to capture window.");
-        }
+        // Handle double-click (same as clicking capture button)
+        on_capture_clicked();
     }
     
-    // Populate the window list with all windows, including duplicates for analysis
-    void populate_window_list() {
-        list_store->clear();
-        window_infos.clear();
-        
-        // Get list of windows from X11ScreenCapturer
-        std::vector<X11ScreenCapturer::WindowInfo> windows = window_capturer.list_windows();
-        
-        // Store the window infos to keep them alive
-        window_infos = windows;
-        
-        bool prefer_decorated = decorations_check.get_active();
-        
-        // First pass: add all windows to the list without filtering
-        // This helps with analysis to see what windows are available
-        for (size_t i = 0; i < window_infos.size(); i++) {
-            X11ScreenCapturer::WindowInfo& info = window_infos[i];
-            
-            // Skip windows with empty titles and very small windows
-            if ((info.title.empty() && info.wm_class.empty()) || 
-                (info.width < 10 || info.height < 10)) {
-                continue;
-            }
-            
-            // Add window to the list
-            Gtk::TreeModel::Row row = *(list_store->append());
-            row[columns.col_id] = Glib::ustring::format(info.id);
-            row[columns.col_title] = info.title.empty() ? ("Class: " + info.wm_class) : info.title;
-            row[columns.col_window_type] = info.window_type.empty() ? "Unknown" : info.window_type;
-            row[columns.col_dimensions] = Glib::ustring::format(info.width, "×", info.height);
-            row[columns.col_position] = Glib::ustring::format("(", info.x, ",", info.y, ")");
-            row[columns.col_window_info_ptr] = &info;
+    // Handle keyboard shortcuts
+    bool on_key_press_event(GdkEventKey* key_event) override {
+        // Check for Ctrl+R (Refresh)
+        if ((key_event->state & GDK_CONTROL_MASK) && key_event->keyval == GDK_KEY_r) {
+            on_refresh_clicked();
+            return true;
         }
         
-        std::cout << "  Added " << list_store->children().size() << " windows to the list." << std::endl;
+        // Check for Ctrl+C (Capture selected)
+        if ((key_event->state & GDK_CONTROL_MASK) && key_event->keyval == GDK_KEY_c) {
+            on_capture_clicked();
+            return true;
+        }
+        
+        // Check for Ctrl+O (Open captures folder)
+        if ((key_event->state & GDK_CONTROL_MASK) && key_event->keyval == GDK_KEY_o) {
+            system("xdg-open captures");
+            return true;
+        }
+        
+        // Check for F5 (Refresh)
+        if (key_event->keyval == GDK_KEY_F5) {
+            on_refresh_clicked();
+            return true;
+        }
+        
+        // Check for F12 (Toggle debug window)
+        if (key_event->keyval == GDK_KEY_F12) {
+            debug_check.set_active(!debug_check.get_active());
+            return true;
+        }
+        
+        // Let parent class handle other keys
+        return Gtk::Window::on_key_press_event(key_event);
+    }
+    
+    // Populate the list with windows or screens based on current selection
+    void populate_list() {
+        list_store->clear();
+        window_infos.clear();
+        screen_infos.clear();
+        
+        std::string source_type = source_combo.get_active_id();
+        
+        if (source_type == "window" || source_type == "all") {
+            // Add windows to the list
+            std::vector<X11ScreenCapturer::WindowInfo> windows = window_capturer.list_windows();
+            window_infos = windows;
+            
+            // Add detailed info to debug
+            std::cout << "🔍 Window Detection Details:" << std::endl;
+            for (size_t i = 0; i < window_infos.size(); i++) {
+                X11ScreenCapturer::WindowInfo& info = window_infos[i];
+                std::cout << "  Window " << i << ":" << std::endl;
+                std::cout << "    ID: " << info.id << std::endl;
+                std::cout << "    Title: \"" << info.title << "\"" << std::endl;
+                std::cout << "    Position: (" << info.x << "," << info.y << ")" << std::endl;
+                std::cout << "    Size: " << info.width << "×" << info.height << std::endl;
+                std::cout << "    Visible: " << (info.is_visible ? "Yes" : "No") << std::endl;
+                
+                Gtk::TreeModel::Row row = *(list_store->append());
+                row[columns.col_id] = Glib::ustring::format(info.id);
+                row[columns.col_title] = info.title;
+                row[columns.col_window_type] = "Window";
+                row[columns.col_dimensions] = Glib::ustring::format(info.width, "×", info.height);
+                row[columns.col_position] = Glib::ustring::format("(", info.x, ",", info.y, ")");
+                row[columns.col_window_info_ptr] = &info;
+                row[columns.col_screen_info_ptr] = nullptr;
+                row[columns.col_item_type] = "window";
+            }
+        }
+        
+        if (source_type == "screen" || source_type == "all") {
+            // Add screens to the list
+            std::vector<X11ScreenCapturer::ScreenInfo> screens = window_capturer.detect_screens();
+            screen_infos = screens;
+            
+            for (size_t i = 0; i < screen_infos.size(); i++) {
+                X11ScreenCapturer::ScreenInfo& info = screen_infos[i];
+                
+                Gtk::TreeModel::Row row = *(list_store->append());
+                row[columns.col_id] = info.number < 0 ? "ALL" : Glib::ustring::format(info.number);
+                row[columns.col_title] = info.name;
+                row[columns.col_window_type] = "Screen";
+                row[columns.col_dimensions] = Glib::ustring::format(info.width, "×", info.height);
+                row[columns.col_position] = Glib::ustring::format("(", info.x, ",", info.y, ")");
+                row[columns.col_window_info_ptr] = nullptr;
+                row[columns.col_screen_info_ptr] = &info;
+                row[columns.col_item_type] = "screen";
+            }
+        }
+        
+        std::cout << "  Added " << list_store->children().size() << " items to the list." << std::endl;
     }
     
     bool on_delete_event(GdkEventAny* event) override {
         std::cout << "  MyWindow delete event." << std::endl;
         return Gtk::Window::on_delete_event(event);
     }
+    
+    // Add text to debug window
+    void add_debug_text(const std::string& text) {
+        Glib::RefPtr<Gtk::TextBuffer> buffer = debug_view.get_buffer();
+        buffer->insert(buffer->end(), text);
+        
+        // Scroll to the end
+        auto mark = buffer->create_mark("end", buffer->end(), false);
+        debug_view.scroll_to(mark);
+        buffer->delete_mark(mark);
+    }
 
 private:
+    // Debug streambuf to redirect cout to our debug window
+    class DebugStreambuf : public std::streambuf {
+    public:
+        DebugStreambuf(MyWindow* window) : window_(window) {}
+        
+    protected:
+        virtual int_type overflow(int_type c = traits_type::eof()) {
+            if (c != traits_type::eof()) {
+                buffer_ += static_cast<char>(c);
+                if (c == '\n') {
+                    // Add to debug window on newline
+                    window_->add_debug_text(buffer_);
+                    buffer_.clear();
+                }
+            }
+            return c;
+        }
+        
+    private:
+        MyWindow* window_;
+        std::string buffer_;
+    };
+    
     // UI components
     Gtk::Box box;
     Gtk::ScrolledWindow scrolled_window;
@@ -1292,15 +1173,28 @@ private:
     Gtk::Button refresh_button;
     Gtk::Button capture_button;
     Gtk::CheckButton decorations_check;
+    Gtk::CheckButton debug_check;
     Gtk::Label format_label;
     Gtk::ComboBoxText format_combo;
+    Gtk::ComboBoxText source_combo;
     Gtk::Statusbar status_bar;
+    
+    // Debug components
+    Gtk::ScrolledWindow debug_window;
+    Gtk::TextView debug_view;
+    Glib::RefPtr<Gtk::TextBuffer> debug_buffer;
+    DebugStreambuf* debug_streambuf;
+    std::streambuf* cout_buffer;
     
     // Capture functionality
     X11ScreenCapturer window_capturer;
     std::vector<X11ScreenCapturer::WindowInfo> window_infos;
+    std::vector<X11ScreenCapturer::ScreenInfo> screen_infos;
     
-    // Window columns class with added window_type column
+    // Recent captures panel
+    RecentCapturesPanel recent_captures_panel;
+    
+    // Window columns class
     class WindowColumns : public Gtk::TreeModel::ColumnRecord {
     public:
         WindowColumns() {
@@ -1310,6 +1204,8 @@ private:
             add(col_dimensions);
             add(col_position);
             add(col_window_info_ptr);
+            add(col_screen_info_ptr);
+            add(col_item_type);
         }
 
         Gtk::TreeModelColumn<Glib::ustring> col_id;
@@ -1318,6 +1214,8 @@ private:
         Gtk::TreeModelColumn<Glib::ustring> col_dimensions;
         Gtk::TreeModelColumn<Glib::ustring> col_position;
         Gtk::TreeModelColumn<X11ScreenCapturer::WindowInfo*> col_window_info_ptr;
+        Gtk::TreeModelColumn<X11ScreenCapturer::ScreenInfo*> col_screen_info_ptr;
+        Gtk::TreeModelColumn<Glib::ustring> col_item_type;
     };
     
     WindowColumns columns;

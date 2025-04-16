@@ -20,6 +20,9 @@ pkg_check_modules(CAIRO REQUIRED cairo)
 # Add XComposite for better window capture
 pkg_check_modules(XCOMPOSITE REQUIRED xcomposite)
 
+# Add JPEG library support
+pkg_check_modules(JPEG REQUIRED libjpeg)
+
 include_directories(
     ${X11_INCLUDE_DIR}
     ${XRANDR_INCLUDE_DIRS}
@@ -29,6 +32,7 @@ include_directories(
     ${UUID_INCLUDE_DIRS}
     ${CAIRO_INCLUDE_DIRS}
     ${XCOMPOSITE_INCLUDE_DIRS}
+    ${JPEG_INCLUDE_DIRS}
 )
 
 link_directories(
@@ -39,6 +43,7 @@ link_directories(
     ${UUID_LIBRARY_DIRS}
     ${CAIRO_LIBRARY_DIRS}
     ${XCOMPOSITE_LIBRARY_DIRS}
+    ${JPEG_LIBRARY_DIRS}
 )
 
 add_executable(pipewrench
@@ -54,5 +59,6 @@ target_link_libraries(pipewrench
     ${UUID_LIBRARIES}
     ${CAIRO_LIBRARIES}
     ${XCOMPOSITE_LIBRARIES}
+    ${JPEG_LIBRARIES}
 )
 
