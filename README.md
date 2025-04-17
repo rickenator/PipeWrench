@@ -14,11 +14,44 @@ The application attempts to:
 
 Additionally, PipeWrench includes a fallback mechanism using direct X11 capture when the portal service fails.
 
+## Sauron Eye - MQTT Integration
+
+The `sauron-eye` branch includes MQTT client functionality that allows PipeWrench to publish captured images to an MQTT broker. This feature enables integration with remote monitoring systems, automation, or any MQTT-compatible application.
+
+### MQTT Features
+
+- Connect to any MQTT broker with optional username/password authentication
+- Publish captured window and screen images to configurable topics
+- Include metadata with each image (filename, timestamp, etc.)
+- Auto-publish option to send all captures automatically
+- Manual publishing of previous captures
+- Real-time connection status feedback
+
+### Using MQTT Functionality
+
+1. **Connect to an MQTT Broker**:
+   - Enter the broker hostname/IP and port (default: localhost:1883)
+   - Provide optional username and password if your broker requires authentication
+   - Click "Connect"
+
+2. **Configure Topics**:
+   - Set the topic prefix for your images (default: pipewrench/captures)
+   - Images will be published to `<prefix>/image`
+   - Metadata will be published to `<prefix>/metadata`
+
+3. **Publishing Images**:
+   - Enable "Auto-publish captures" to automatically send all new captures to the broker
+   - Use the "Publish Last Capture" button to manually publish the most recent capture
+
+### Required Dependencies
+
+- libmosquitto-dev (MQTT client library)
+
 ## Important: Wayland Compatibility Notice
 
 **PipeWrench requires X11 to function properly for screen and window captures.**
 
-If you're running under Wayland (the default display server in many recent Linux distributions), screen/window captures will fail with error messages like:
+If you're running under Wayland (the default display server in many recent Linux distributions), some screen/window captures will fail with error messages like:
 ```
 ❌ Failed to get screen image
 ❌ Failed to capture screen image

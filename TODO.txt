@@ -1,0 +1,20 @@
+Refactor: 
+    Break pipewrence up into separable class files. 
+    Rename the executable to sauron and any references to pipewrench or PipeWrench are now sauron. 
+        The title bar can read "Sauron's Eye"
+
+Feature updates:
+
+    Look at the SauronEye directory for starters. It includes the AI router and the keyboard 
+        interposer.
+    The router needs to be cleaned up since all the capture interface is on sauron in the C++ 
+        side, while sauron will need to implement the commands received from the keyboard 
+        related to capture/send. The main reason for keeping this code python is debatable
+        since all the AI interfaces are wrappers around HTTP. One idea worth considering is
+        if utilities like LangChain are useful and why if the functionality can be done in C++
+        easily it should be. Like why not make a vector store locally in C++ ? that would be
+        impressive.
+    Some commands from the keyboard are for the use of the AI router's chat 
+        interface, in particular to scroll the text area. Some are for the capture UI.
+        This will also need to be part of the AI router clean up.
+
