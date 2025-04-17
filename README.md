@@ -2,6 +2,8 @@
 
 An IoT based screen capture tool for Linux desktop. Formerly called PipeWrench and will continue to be until the grand merge, this integrates into the SauronEye project. Sauron, taken from the Tolkien mythos, was a really bad dude and had this magic eye that could see everything his enemies were doing in Middle Earth. PipeWrench stemmed from the frustration of PipeWire's xdg-desktop-portal crashing in Ubuntu 24.04, apparently a known issue.
 
+![Sauron's Eye Screenshot](sauron.png)
+
 Well OK that's a bit dramatic, this is a distributed screen capture intended to be a front end to an AI desktop assistant.
 
 ## Overview
