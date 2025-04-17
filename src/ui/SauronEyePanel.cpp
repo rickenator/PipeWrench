@@ -6,6 +6,7 @@
 #include <iomanip>
 #include <sstream>
 #include <gtkmm/icontheme.h>
+#include <glibmm/main.h>
 
 SauronEyePanel::SauronEyePanel(std::shared_ptr<X11ScreenCapturer> capturer, 
                              std::shared_ptr<MqttClient> mqtt_client)
@@ -180,6 +181,11 @@ SauronEyePanel::SauronEyePanel(std::shared_ptr<X11ScreenCapturer> capturer,
     refresh_screen_list();
     
     show_all_children();
+
+    // Set up auto-refresh for window and screen lists
+    auto_refresh_connection_ = Glib::signal_timeout().connect_seconds(
+        sigc::mem_fun(*this, &SauronEyePanel::auto_refresh),
+        auto_refresh_interval_sec_);
 }
 
 SauronEyePanel::~SauronEyePanel() {
@@ -522,4 +528,11 @@ void SauronEyePanel::on_copy_window_id() {
         
         std::cout << "📋 Window ID copied to clipboard: " << window_id << std::endl;
     }
+}
+
+// Helper for periodic refresh: refreshes window and screen lists
+bool SauronEyePanel::auto_refresh() {
+    refresh_window_list();
+    refresh_screen_list();
+    return true; // Continue calling
 }

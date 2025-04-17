@@ -59,6 +59,13 @@ private:
     void perform_capture();
     void execute_capture(const std::string& type, unsigned long id);
     
+    // Automatic refresh for window and screen lists
+    sigc::connection auto_refresh_connection_;
+    int auto_refresh_interval_sec_ = 5;  // Refresh interval in seconds
+
+    // Helper for periodic refresh
+    bool auto_refresh();
+
     // UI components
     Gtk::Frame capture_frame_;
     Gtk::Box capture_box_;
