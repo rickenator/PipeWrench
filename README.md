@@ -1,18 +1,20 @@
-# PipeWrench
+# Sauron's Eye
 
-A testing tool for evaluating Linux desktop screen capture capabilities, specifically focusing on the xdg-desktop-portal interface and PipeWire-based screen sharing on Linux.
+An IoT based screen capture tool for Linux desktop. Formerly called PipeWrench and will continue to be until the grand merge, this integrates into the SauronEye project. Sauron, taken from the Tolkein mythos, was a really bad dude and had this magic eye that could see everything his enemies were doing in Middle Earth. PipeWrench stemmed from the frustration of PipeWire's xdg-desktop-portal crashing in Ubuntu 24.04, apparently a known issue.
+
+Well OK that's a bit dramatic, this is a distributed screen capture intended to be a front end to an AI desktop assistant.
 
 ## Overview
 
-PipeWrench is a diagnostic utility designed to test screen capture capabilities on Linux using xdg-desktop-portal and PipeWire. It provides a simple interface to exercise the portal's ScreenCast API and helps diagnose compatibility issues with different implementations.
+SauronEye is a diagnostic utility designed to test screen capture capabilities on Linux using xdg-desktop-portal and PipeWire. It provides a simple interface to exercise the portal's ScreenCast API and helps diagnose compatibility issues with different implementations. Things are in flux with early development, some of the middleware is in the SauronEye repository - python scripts that will probably be moved to the C++ front end in places, and a daemon in others.
 
-The application attempts to:
+The application attempted to:
 1. Connect to the xdg-desktop-portal service via D-Bus
 2. Create a screen capture session using the ScreenCast interface
 3. Request access to screen content
 4. Provide diagnostic information about the process
 
-Additionally, PipeWrench includes a fallback mechanism using direct X11 capture when the portal service fails.
+Additionally, SauronEye includes a fallback mechanism using direct X11 capture when the portal service fails.
 
 ## Sauron Eye - MQTT Integration
 
@@ -36,8 +38,9 @@ The `sauron-eye` branch includes MQTT client functionality that allows PipeWrenc
 
 2. **Configure Topics**:
    - Set the topic prefix for your images (default: pipewrench/captures)
-   - Images will be published to `<prefix>/image`
+   - PNG images in Base64 will be published to `<prefix>/image` - This is the only topic the front end publishes to.
    - Metadata will be published to `<prefix>/metadata`
+   - Command and control to `<prefix>/command`
 
 3. **Publishing Images**:
    - Enable "Auto-publish captures" to automatically send all new captures to the broker
@@ -97,6 +100,8 @@ The default xdg-desktop-portal package (version 1.18.4) in Ubuntu 24.04 contains
 
 This makes it impossible to use standard screen sharing functionality in applications that rely on the portal, such as web browsers for video conferencing, many screen recording tools, and remote desktop applications.
 
+Hence the need for a usable framework using traditional X11 as the display backend. 
+
 ### Error Details
 
 When the portal crashes, the following can be observed in logs:
@@ -116,7 +121,7 @@ GDBus.Error:org.freedesktop.DBus.Error.NoReply: Message recipient disconnected f
 
 PipeWrench implements two workarounds:
 
-1. **Direct X11 Capture**: Falls back to using X11's screen capture capabilities using XCopyArea and pixmap methods
+1. **Direct X11 Capture**: Falls back to using X11's screen capture capabilities using XCopyArea and pixmap methods [ portals are disabled and removed this is a historical note ]
 2. **Manual Portal Configuration**: The user can configure their system to use alternative portal backends by creating a configuration file at `~/.config/xdg-desktop-portal/portals.conf` (though this doesn't fully resolve the issue with the current Ubuntu packages)
 
 ### Alternative Solutions
@@ -147,9 +152,9 @@ make
 
 ```bash
 cd build
-./pipewrench
+./sauron
 ```
 
 ## License
 
-[Insert your license information here]
+See LICENSE.txt
