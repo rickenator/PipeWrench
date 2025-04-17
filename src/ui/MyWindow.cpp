@@ -245,7 +245,7 @@ void SauronWindow::add_thumbnail(const std::string& filepath) {
 void SauronWindow::on_thumbnail_clicked(const std::string& filepath) {
     if (mqtt_connected_) {
         if (mqtt_client_->publish_image(mqtt_topic_entry_.get_text(), 
-                                      filepath, "", "manual", false)) {
+                                      filepath, "", "manual", true)) {
             status_bar_.push("Sent to MQTT: " + filepath);
         } else {
             status_bar_.push("Failed to send to MQTT: " + filepath);
@@ -288,7 +288,7 @@ void SauronWindow::on_thumbnail_activated_capture(const std::string& filepath) {
 void SauronWindow::on_send_clicked() {
     if (!last_capture_path_.empty() && mqtt_connected_) {
         if (mqtt_client_->publish_image(mqtt_topic_entry_.get_text(), 
-                                      last_capture_path_, "", "manual", false)) {
+                                      last_capture_path_, "", "manual", true)) {
             status_bar_.push("Sent latest capture to MQTT: " + last_capture_path_);
         } else {
             status_bar_.push("Failed to send latest capture to MQTT: " + last_capture_path_);

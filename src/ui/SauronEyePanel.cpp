@@ -11,8 +11,8 @@ SauronEyePanel::SauronEyePanel(std::shared_ptr<X11ScreenCapturer> capturer,
                              std::shared_ptr<MqttClient> mqtt_client)
     : Gtk::Box(Gtk::ORIENTATION_VERTICAL, 5),
       screen_capturer_(capturer),
-      mqtt_client_(mqtt_client),
-      windows_list_store_(Gtk::ListStore::create(windows_columns_))  // Fixed variable name
+      windows_list_store_(Gtk::ListStore::create(windows_columns_)),
+      mqtt_client_(mqtt_client)  // Reordered to match declaration order in header
 {
     set_margin_top(10);
     set_margin_bottom(10);
@@ -53,7 +53,9 @@ SauronEyePanel::SauronEyePanel(std::shared_ptr<X11ScreenCapturer> capturer,
     windows_tree_view_.append_column("Window Title", windows_columns_.m_col_title);
     windows_tree_view_.append_column("Size", windows_columns_.m_col_size);
     windows_tree_view_.signal_row_activated().connect(
-        sigc::mem_fun(*this, &SauronEyePanel::on_window_activated));
+        sigc::mem_fun(*this, &SauronEyePanel::on_tree_view_row_activated));
+    windows_tree_view_.signal_button_press_event().connect(
+        sigc::mem_fun(*this, &SauronEyePanel::on_window_button_press_event), false);
     
     // Configure window list scrolled window
     windows_scrolled_window_.set_policy(Gtk::POLICY_AUTOMATIC, Gtk::POLICY_AUTOMATIC);
@@ -104,6 +106,8 @@ SauronEyePanel::SauronEyePanel(std::shared_ptr<X11ScreenCapturer> capturer,
     screens_tree_view_.append_column("", screens_columns_.m_col_icon);
     screens_tree_view_.append_column("Screen", screens_columns_.m_col_name);
     screens_tree_view_.append_column("Resolution", screens_columns_.m_col_resolution);
+    screens_tree_view_.signal_row_activated().connect(
+        sigc::mem_fun(*this, &SauronEyePanel::on_screens_row_activated));
     
     // Configure screen list scrolled window
     screens_scrolled_window_.set_policy(Gtk::POLICY_AUTOMATIC, Gtk::POLICY_AUTOMATIC);
@@ -160,7 +164,7 @@ SauronEyePanel::SauronEyePanel(std::shared_ptr<X11ScreenCapturer> capturer,
     delay_box_.pack_start(delay_label_, Gtk::PACK_SHRINK);
     delay_box_.pack_start(delay_spin_, Gtk::PACK_SHRINK);
     
-    // Add options to box
+    // Add delay option to options box
     options_box_.pack_start(delay_box_, Gtk::PACK_SHRINK);
     
     // Add options box to frame
@@ -272,98 +276,250 @@ void SauronEyePanel::on_capture_screen_clicked() {
     }
 }
 
-void SauronEyePanel::on_window_activated(const Gtk::TreeModel::Path& path, Gtk::TreeViewColumn*) {
+void SauronEyePanel::on_tree_view_row_activated(const Gtk::TreeModel::Path& path, Gtk::TreeViewColumn* column) {
     Gtk::TreeModel::iterator iter = windows_list_store_->get_iter(path);
     if (iter) {
-        unsigned long window_id = (*iter)[windows_columns_.m_col_id];
-        // Find the window info for this ID
-        auto windows = screen_capturer_->list_windows();
-        auto it = std::find_if(windows.begin(), windows.end(),
-                             [window_id](const X11ScreenCapturer::WindowInfo& w) {
-                                 return w.id == window_id;
-                             });
-        if (it != windows.end()) {
-            auto now = std::chrono::system_clock::now();
-            std::time_t now_time = std::chrono::system_clock::to_time_t(now);
+        Gtk::TreeModel::Row row = *iter;
+        unsigned long window_id = row[windows_columns_.m_col_id];
+        // Capture and immediately publish on double-click
+        std::string filepath = take_capture("window", window_id);
+        if (!filepath.empty() && mqtt_client_) {
+            std::string topic = "sauron/capture/image";
+            bool use_base64 = true;
+            mqtt_client_->publish_image(topic, filepath, "", "window", use_base64);
+        }
+    }
+}
 
-            // Format filename with timestamp
-            std::stringstream ss;
-            ss << "captures/window_" << std::put_time(std::localtime(&now_time), "%Y%m%d_%H%M%S") << ".png";
-            std::string filename = ss.str();
+void SauronEyePanel::on_screens_row_activated(const Gtk::TreeModel::Path& path, Gtk::TreeViewColumn* column) {
+    Gtk::TreeModel::iterator iter = screens_list_store_->get_iter(path);
+    if (iter) {
+        Gtk::TreeModel::Row row = *iter;
+        unsigned long screen_id = row[screens_columns_.m_col_id];
+        // Capture and immediately publish on double-click
+        std::string filepath = take_capture("screen", screen_id);
+        // Always publish via MQTT on double-click
+        if (!filepath.empty() && mqtt_client_) {
+            std::string topic = "sauron/capture/image";
+            bool use_base64 = true;
+            mqtt_client_->publish_image(topic, filepath, "", "screen", use_base64);
+        }
+    }
+}
 
-            // Take the capture
-            if (screen_capturer_->capture_window(*it, filename)) {
-                m_signal_capture_taken.emit(filename);
-                // After successful capture, immediately send via MQTT if connected
-                if (mqtt_client_) {
-                    mqtt_client_->publish_image("sauron/captures/image", filename, "", "auto", false);
-                }
+void SauronEyePanel::trigger_capture() {
+    trigger_capture("manual");
+}
+
+void SauronEyePanel::trigger_capture(const std::string& trigger_type) {
+    auto selected_window = get_selected_window();
+    
+    if (selected_window) {
+        take_capture("window", selected_window->id);
+    } else {
+        // No window selected, try to capture the first screen
+        if (!screens_list_store_->children().empty()) {
+            auto iter = screens_list_store_->children().begin();
+            if (iter) {
+                Gtk::TreeModel::Row row = *iter;
+                unsigned long screen_id = row[screens_columns_.m_col_id];
+                take_capture("screen", screen_id);
             }
         }
     }
 }
 
-std::string SauronEyePanel::take_capture(const std::string& type, unsigned long id) {
-    int delay_seconds = delay_spin_.get_value_as_int();
-    
-    // Handle delay if set
-    if (delay_seconds > 0) {
-        std::cout << "🕒 Waiting " << delay_seconds << " seconds before capture..." << std::endl;
-        
-        // Countdown feedback
-        for (int i = delay_seconds; i > 0; --i) {
-            std::cout << "🕒 " << i << "..." << std::endl;
-            std::this_thread::sleep_for(std::chrono::seconds(1));
+void SauronEyePanel::perform_capture() {
+    auto selected_window = get_selected_window();
+    if (selected_window) {
+        std::string filepath = take_capture("window", selected_window->id);
+        if (!filepath.empty()) {
+            std::cout << "Captured window to: " << filepath << std::endl;
+        }
+    } else {
+        std::cerr << "No window selected for capture" << std::endl;
+    }
+}
+
+std::optional<X11ScreenCapturer::WindowInfo> SauronEyePanel::get_selected_window() {
+    auto selection = windows_tree_view_.get_selection();
+    auto iter = selection->get_selected();
+    if (!iter) return std::nullopt;
+    auto row = *iter;
+    unsigned long window_id = row[windows_columns_.m_col_id];
+    // Directly lookup full WindowInfo from capturer
+    auto windows = screen_capturer_->list_windows();
+    for (const auto& w : windows) {
+        if (w.id == window_id) {
+            return w;
         }
     }
+    return std::nullopt;
+}
+
+std::optional<X11ScreenCapturer::ScreenInfo> SauronEyePanel::get_selected_screen() {
+    auto selection = screens_tree_view_.get_selection();
+    auto iter = selection->get_selected();
+    if (!iter) return std::nullopt;
+    auto row = *iter;
+    int screen_number = row[screens_columns_.m_col_id];
+    // Directly lookup full ScreenInfo from capturer
+    auto screens = screen_capturer_->detect_screens();
+    for (const auto& s : screens) {
+        if (s.number == screen_number) {
+            return s;
+        }
+    }
+    return std::nullopt;
+}
+
+std::string SauronEyePanel::generate_capture_filename(const std::string& type) {
+    // Get current time
+    auto now = std::chrono::system_clock::now();
+    auto time_t_now = std::chrono::system_clock::to_time_t(now);
     
-    std::string capture_filename;
-    bool success = false;
-    std::string timestamp;
-    {
-        auto now = std::chrono::system_clock::now();
-        auto t = std::chrono::system_clock::to_time_t(now);
-        std::ostringstream oss;
-        oss << std::put_time(std::localtime(&t), "%Y%m%d_%H%M%S");
-        timestamp = oss.str();
+    // Format the filename with date and time
+    std::stringstream ss;
+    ss << "captures/";
+    
+    // Create directory if it doesn't exist
+    std::filesystem::create_directories("captures");
+    
+    // Add timestamp to filename
+    std::tm tm = *std::localtime(&time_t_now);
+    ss << (type == "window" ? "window_" : "screen_")
+       << std::put_time(&tm, "%Y%m%d_%H%M%S") << ".png";
+    
+    return ss.str();
+}
+
+std::string SauronEyePanel::take_capture(const std::string& type, unsigned long id) {
+    int delay_seconds = delay_spin_.get_value_as_int();
+    std::optional<X11ScreenCapturer::WindowInfo> window_info_opt;
+
+    if (delay_seconds > 0) {
+        std::cout << "⏱️ Capture will start in " << delay_seconds << " seconds..." << std::endl;
+        // Sleep for the specified delay
+        std::this_thread::sleep_for(std::chrono::seconds(delay_seconds));
+    }
+
+    std::string filename = generate_capture_filename(type);
+    std::string filepath = "";
+
+    if (type == "window") {
+        window_info_opt = get_selected_window();
+        if (window_info_opt) {
+            auto window_info = window_info_opt.value();
+            if (screen_capturer_->capture_window(window_info, filename)) {
+                filepath = std::filesystem::absolute(filename).string();
+            } else {
+                std::cerr << "❌ Failed to capture window" << std::endl;
+                return "";
+            }
+        } else {
+            std::cerr << "❌ No window selected" << std::endl;
+            return "";
+        }
+    } else if (type == "screen") {
+        auto screen_info_opt = get_selected_screen();
+        if (screen_info_opt) {
+            auto screen_info = screen_info_opt.value();
+            if (screen_capturer_->capture_screen(screen_info.number, filename)) {
+                filepath = std::filesystem::absolute(filename).string();
+            } else {
+                std::cerr << "❌ Failed to capture screen" << std::endl;
+                return "";
+            }
+        } else {
+            std::cerr << "❌ No screen selected" << std::endl;
+            return "";
+        }
+    } else {
+        std::cerr << "❌ Unknown capture type: " << type << std::endl;
+        return "";
+    }
+
+    // Emit signals
+    m_signal_capture_taken.emit(filepath);
+    m_signal_capture_taken_extended.emit(filepath, type, std::to_string(id));
+
+    // No internal MQTT publishing; SauronWindow will handle via signals
+
+    return filepath;
+}
+
+bool SauronEyePanel::save_capture(const std::shared_ptr<Gdk::Pixbuf>& capture, const std::string& filename) {
+    if (!capture) {
+        std::cerr << "❌ Cannot save null capture" << std::endl;
+        return false;
     }
     
     try {
-        if (type == "window") {
-            // find window info
-            X11ScreenCapturer::WindowInfo target;
-            bool found = false;
-            for (auto& w : screen_capturer_->list_windows()) {
-                if (w.id == id) { target = w; found = true; break; }
-            }
-            if (!found) { std::cerr << "❌ Window id not found\n"; return ""; }
-            capture_filename = "captures/window_" + timestamp + ".png";
-            success = screen_capturer_->capture_window(target, capture_filename);
-        } else if (type == "screen") {
-            // find screen info
-            bool found = false;
-            for (auto& s : screen_capturer_->detect_screens()) {
-                if ((unsigned long)s.number == id) { found = true; break; }
-            }
-            if (!found) { std::cerr << "❌ Screen id not found\n"; return ""; }
-            capture_filename = "captures/screen_" + timestamp + ".png";
-            success = screen_capturer_->capture_screen((int)id, capture_filename);
-        } else {
-            std::cerr << "❌ Unknown capture type: " << type << std::endl;
-            return "";
-        }
-        
-        if (success) {
-            std::cout << "✅ Capture saved to: " << capture_filename << std::endl;
-            
-            // Emit signal with capture filename
-            m_signal_capture_taken.emit(capture_filename);
-        } else {
-            std::cerr << "❌ Failed to capture " << type << std::endl;
-        }
-    } catch (const std::exception& ex) {
-        std::cerr << "❌ Exception during capture: " << ex.what() << std::endl;
+        capture->save(filename, "png");
+        std::cout << "✅ Saved capture to " << filename << std::endl;
+        return true;
+    } catch (const Glib::Error& e) {
+        std::cerr << "❌ Failed to save capture: " << e.what() << std::endl;
+        return false;
     }
+}
+
+bool SauronEyePanel::on_window_button_press_event(GdkEventButton* event) {
+    if (event->type == GDK_BUTTON_PRESS && event->button == 3) {
+        // Right-click detected
+        Glib::RefPtr<Gtk::TreeSelection> selection = windows_tree_view_.get_selection();
+        
+        // Get tree path at the position of the right-click
+        Gtk::TreeModel::Path path;
+        Gtk::TreeViewColumn* column;
+        int cell_x, cell_y;
+        
+        if (windows_tree_view_.get_path_at_pos(static_cast<int>(event->x), 
+                                              static_cast<int>(event->y),
+                                              path, column, cell_x, cell_y)) {
+            // Select the row that was right-clicked
+            selection->select(path);
+            // Show context menu
+            show_context_menu(event);
+            return true;
+        }
+    }
+    return false;
+}
+
+void SauronEyePanel::show_context_menu(GdkEventButton* event) {
+    Gtk::Menu popup_menu;
     
-    return capture_filename;
+    // Create menu items
+    Gtk::MenuItem* capture_item = Gtk::manage(new Gtk::MenuItem("Capture Window"));
+    capture_item->signal_activate().connect(
+        sigc::mem_fun(*this, &SauronEyePanel::on_capture_window_clicked));
+    popup_menu.append(*capture_item);
+    
+    // Add a separator
+    popup_menu.append(*Gtk::manage(new Gtk::SeparatorMenuItem()));
+    
+    // Copy option
+    Gtk::MenuItem* copy_item = Gtk::manage(new Gtk::MenuItem("Copy Window ID"));
+    copy_item->signal_activate().connect(sigc::mem_fun(*this, &SauronEyePanel::on_copy_window_id));
+    popup_menu.append(*copy_item);
+    
+    popup_menu.show_all();
+    popup_menu.popup(event->button, event->time);
+}
+
+void SauronEyePanel::on_copy_window_id() {
+    Glib::RefPtr<Gtk::TreeSelection> selection = windows_tree_view_.get_selection();
+    Gtk::TreeModel::iterator iter = selection->get_selected();
+    
+    if (iter) {
+        Gtk::TreeModel::Row row = *iter;
+        unsigned long window_id = row[windows_columns_.m_col_id];
+        
+        // Convert window_id to string and copy to clipboard
+        Glib::RefPtr<Gtk::Clipboard> clipboard = Gtk::Clipboard::get();
+        clipboard->set_text(std::to_string(window_id));
+        
+        std::cout << "📋 Window ID copied to clipboard: " << window_id << std::endl;
+    }
 }

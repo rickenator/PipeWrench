@@ -3,58 +3,34 @@
 
 #include <mosquitto.h>
 #include <string>
-#include <vector>
-#include <thread>
-#include <mutex>
-#include <atomic>
+#include <memory>
+#include <functional>
 
 class MqttClient {
 public:
+    using MessageCallback = std::function<void(const std::string&, const std::string&)>;
+    
     MqttClient();
     ~MqttClient();
-    
-    bool connect(const std::string& clientId, 
-                 const std::string& host = "localhost", 
-                 int port = 1883, 
-                 const std::string& username = "", 
-                 const std::string& password = "");
-    
+
+    bool connect(const std::string& host, const std::string& username, int port = 1883);
     void disconnect();
-    
-    bool publish_image(const std::string& topic, const std::string& image_path, 
-                       const std::string& window_title = "", 
-                       const std::string& capture_type = "",
-                       bool retain = false);
-    
     bool is_connected() const { return connected_; }
-    
-    std::string base64_encode(const std::vector<char>& input);
-    
+    bool publish(const std::string& topic, const std::string& message);
+    bool publish_image(const std::string& topic, const std::string& filename, 
+                      const std::string& window_title, const std::string& trigger_type,
+                      bool as_base64 = false);
+    void set_message_callback(MessageCallback callback);
+    bool subscribe(const std::string& topic);
+
 private:
-    struct mosquitto* mosquitto_;
-    std::string host_;
-    int port_;
+    struct mosquitto* mosq_;
     bool connected_;
-    std::atomic<bool> running_;
-    std::thread loop_thread_;
-    std::mutex mqtt_mutex_;
+    MessageCallback message_callback_;
     
-    void start_loop();
-    void stop_loop();
-    void loop_worker();
-    
-    // Callback handlers
-    void on_connect(int rc);
-    void on_disconnect(int rc);
-    void on_publish(int mid);
-    
-    // Static callback wrappers
-    static void on_connect_wrapper(struct mosquitto* mosq, void* obj, int rc);
-    static void on_disconnect_wrapper(struct mosquitto* mosq, void* obj, int rc);
-    static void on_publish_wrapper(struct mosquitto* mosq, void* obj, int mid);
-    
-    std::string get_current_timestamp();
-    std::string escape_json_string(const std::string& input);
+    static void on_connect_callback(struct mosquitto* mosq, void* obj, int rc);
+    static void on_disconnect_callback(struct mosquitto* mosq, void* obj, int rc);
+    static void on_message_callback(struct mosquitto* mosq, void* obj, const struct mosquitto_message* message);
 };
 
 #endif // MQTT_CLIENT_H

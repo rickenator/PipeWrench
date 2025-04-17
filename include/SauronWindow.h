@@ -47,6 +47,8 @@ private:
     Gtk::Entry mqtt_host_entry_;
     Gtk::Entry mqtt_port_entry_;
     Gtk::Entry mqtt_topic_entry_;
+    Gtk::Entry mqtt_command_topic_entry_;
+    Gtk::Label mqtt_command_topic_label_{"Command Topic"};
     Gtk::Label mqtt_status_label_;
     Gtk::Button mqtt_connect_button_;
     Gtk::Button send_button_;
@@ -81,6 +83,13 @@ private:
     void on_thumbnail_activated_capture(const std::string& filepath);
     void on_open_folder_clicked();
     void on_send_clicked();
+    void on_mqtt_message(const std::string& topic, const std::string& payload);
+
+    // Helper methods
+    void handle_capture_command();
+    void handle_mqtt_command(const std::string& command);
+    // Handle captures emitted by SauronEyePanel with extended signal
+    void on_panel_capture(const std::string& filepath, const std::string& type, const std::string& id);
 };
 
 #endif // SAURON_WINDOW_H

@@ -1,276 +1,199 @@
-#include "../include/MqttClient.h"
-
-#include <iostream>
-#include <fstream>
-#include <sstream>
-#include <chrono>
-#include <iomanip>
+#include "../../include/MqttClient.h"
 #include <openssl/bio.h>
 #include <openssl/evp.h>
 #include <openssl/buffer.h>
+#include <fstream>
+#include <iostream>  // Added include for std::cout, std::cerr, std::endl
+#include <sstream>
+#include <vector>
+#include <chrono>
+#include <ctime>
+#include <filesystem>
 
-MqttClient::MqttClient() : mosquitto_(nullptr), connected_(false), running_(false) {
-    // Initialize mosquitto library
+MqttClient::MqttClient() : mosq_(nullptr), connected_(false) {
     mosquitto_lib_init();
+    mosq_ = mosquitto_new(nullptr, true, this);
+    if (mosq_) {
+        mosquitto_connect_callback_set(mosq_, on_connect_callback);
+        mosquitto_disconnect_callback_set(mosq_, on_disconnect_callback);
+    }
 }
 
 MqttClient::~MqttClient() {
-    disconnect();
-    
-    // Free resources
-    if (mosquitto_) {
-        mosquitto_destroy(mosquitto_);
+    if (mosq_) {
+        if (connected_) {
+            mosquitto_disconnect(mosq_);
+        }
+        mosquitto_destroy(mosq_);
     }
-    
-    // Cleanup mosquitto library
     mosquitto_lib_cleanup();
 }
 
-bool MqttClient::connect(const std::string& clientId, 
-                        const std::string& host, 
-                        int port, 
-                        const std::string& username, 
-                        const std::string& password) {
+bool MqttClient::connect(const std::string& host, const std::string& username, int port) {
+    if (!mosq_) return false;
     
-    // Create a new mosquitto client instance
-    if (mosquitto_) {
-        mosquitto_destroy(mosquitto_);
-    }
-    
-    mosquitto_ = mosquitto_new(clientId.c_str(), true, this);
-    if (!mosquitto_) {
-        std::cerr << "❌ Failed to create MQTT client instance" << std::endl;
-        return false;
-    }
-    
-    // Set callbacks
-    mosquitto_connect_callback_set(mosquitto_, on_connect_wrapper);
-    mosquitto_disconnect_callback_set(mosquitto_, on_disconnect_wrapper);
-    mosquitto_publish_callback_set(mosquitto_, on_publish_wrapper);
-    
-    // Set credentials if provided
+    // Set username if provided
     if (!username.empty()) {
-        mosquitto_username_pw_set(mosquitto_, username.c_str(), password.c_str());
+        mosquitto_username_pw_set(mosq_, username.c_str(), nullptr);
     }
     
-    // Connect to the broker
-    int result = mosquitto_connect(mosquitto_, host.c_str(), port, 60);
-    if (result != MOSQ_ERR_SUCCESS) {
-        std::cerr << "❌ Failed to connect to MQTT broker: " << mosquitto_strerror(result) << std::endl;
+    std::cout << "Connecting to MQTT broker at host: " << host << ", port: " << port << std::endl;
+
+    if (host.empty()) {
+        std::cerr << "❌ MQTT connection error: Hostname is empty" << std::endl;
         return false;
     }
-    
-    // Start the network loop in a background thread
-    start_loop();
-    
-    host_ = host;
-    port_ = port;
-    std::cout << "🔌 MQTT client connecting to " << host << ":" << port << std::endl;
-    
+
+    int rc = mosquitto_connect(mosq_, host.c_str(), port, 60);
+    if (rc != MOSQ_ERR_SUCCESS) {
+        std::cerr << "❌ MQTT connection error: " << mosquitto_strerror(rc) << std::endl;
+        return false;
+    }
+
+    rc = mosquitto_loop_start(mosq_);
+    if (rc != MOSQ_ERR_SUCCESS) {
+        std::cerr << "❌ MQTT loop start error: " << mosquitto_strerror(rc) << std::endl;
+        return false;
+    }
+
+    std::cout << "✅ MQTT connected to " << host << ":" << port << std::endl;
     return true;
 }
 
 void MqttClient::disconnect() {
-    // Stop the network loop
-    stop_loop();
-    
-    // Disconnect from the broker
-    if (mosquitto_ && connected_) {
-        mosquitto_disconnect(mosquitto_);
+    if (mosq_ && connected_) {
+        mosquitto_disconnect(mosq_);
+        mosquitto_loop_stop(mosq_, true);
         connected_ = false;
-        std::cout << "🔌 MQTT client disconnected" << std::endl;
     }
 }
 
-bool MqttClient::publish_image(const std::string& topic, const std::string& image_path, 
-                              const std::string& window_title, 
-                              const std::string& capture_type,
-                              bool retain) {
-    if (!mosquitto_ || !connected_) {
-        std::cerr << "❌ MQTT client not connected" << std::endl;
-        return false;
-    }
-    
-    // Read file content
-    std::ifstream file(image_path, std::ios::binary | std::ios::ate);
-    if (!file) {
-        std::cerr << "❌ Failed to open image file: " << image_path << std::endl;
-        return false;
-    }
-    std::streamsize size = file.tellg();
-    file.seekg(0, std::ios::beg);
-    std::vector<char> buffer(size);
-    if (!file.read(buffer.data(), size)) {
-        std::cerr << "❌ Failed to read image file: " << image_path << std::endl;
-        return false;
-    }
-
-    // Base64 encode the image
-    std::string base64_image = base64_encode(buffer);
-
-    // Build metadata JSON with encoded image
-    std::string filename = image_path.substr(image_path.find_last_of('/') + 1);
-    std::ostringstream json;
-    json << "{";
-    json << "\"filename\":\"" << filename << "\",";
-    json << "\"timestamp\":\"" << get_current_timestamp() << "\",";
-    json << "\"source\":\"sauron\",";
-    json << "\"format\":\"" << filename.substr(filename.find_last_of('.') + 1) << "\",";
-    if (!window_title.empty()) json << "\"window_title\":\"" << escape_json_string(window_title) << "\",";
-    if (!capture_type.empty()) json << "\"capture_type\":\"" << capture_type << "\",";
-    json << "\"encoding\":\"base64\",";
-    json << "\"data\":\"" << base64_image << "\"";
-    json << "}";
-    std::string payload = json.str();
-
-    int mid = 0;
-    int result = mosquitto_publish(mosquitto_, &mid, topic.c_str(), payload.size(), payload.c_str(), 0, retain);
-    if (result != MOSQ_ERR_SUCCESS) {
-        std::cerr << "❌ Failed to publish image JSON: " << mosquitto_strerror(result) << std::endl;
-        return false;
-    }
-
-    std::cout << "📤 Published image JSON to " << topic << ", message ID " << mid << std::endl;
-    return true;
-}
-
-void MqttClient::start_loop() {
-    if (running_) {
-        return;
-    }
-    
-    running_ = true;
-    loop_thread_ = std::thread(&MqttClient::loop_worker, this);
-}
-
-void MqttClient::stop_loop() {
-    if (!running_) {
-        return;
-    }
-    
-    running_ = false;
-    if (loop_thread_.joinable()) {
-        loop_thread_.join();
-    }
-}
-
-void MqttClient::loop_worker() {
-    while (running_) {
-        std::lock_guard<std::mutex> lock(mqtt_mutex_);
-        mosquitto_loop(mosquitto_, 100, 1);
-    }
-}
-
-void MqttClient::on_connect(int rc) {
-    if (rc == 0) {
-        connected_ = true;
-        std::cout << "✅ Connected to MQTT broker at " << host_ << ":" << port_ << std::endl;
-    } else {
-        std::cerr << "❌ Failed to connect to MQTT broker: " << mosquitto_connack_string(rc) << std::endl;
-    }
-}
-
-void MqttClient::on_disconnect(int rc) {
-    connected_ = false;
-    
-    if (rc == 0) {
-        std::cout << "👋 Disconnected from MQTT broker" << std::endl;
-    } else {
-        std::cerr << "⚠️ Unexpected disconnection from MQTT broker: " << rc << std::endl;
-    }
-}
-
-void MqttClient::on_publish(int mid) {
-    std::cout << "✅ Message with ID " << mid << " published successfully" << std::endl;
-}
-
-void MqttClient::on_connect_wrapper(struct mosquitto* mosq, void* obj, int rc) {
+void MqttClient::on_connect_callback(struct mosquitto* mosq, void* obj, int rc) {
     MqttClient* client = static_cast<MqttClient*>(obj);
-    if (client) {
-        client->on_connect(rc);
-    }
+    client->connected_ = (rc == 0);
 }
 
-void MqttClient::on_disconnect_wrapper(struct mosquitto* mosq, void* obj, int rc) {
+void MqttClient::on_disconnect_callback(struct mosquitto* mosq, void* obj, int rc) {
     MqttClient* client = static_cast<MqttClient*>(obj);
-    if (client) {
-        client->on_disconnect(rc);
-    }
+    client->connected_ = false;
 }
 
-void MqttClient::on_publish_wrapper(struct mosquitto* mosq, void* obj, int mid) {
+void MqttClient::on_message_callback(struct mosquitto* mosq, void* obj, const struct mosquitto_message* message) {
     MqttClient* client = static_cast<MqttClient*>(obj);
-    if (client) {
-        client->on_publish(mid);
+    if (client && client->message_callback_) {
+        std::string topic(message->topic);
+        std::string payload(static_cast<char*>(message->payload), message->payloadlen);
+        client->message_callback_(topic, payload);
     }
 }
 
-std::string MqttClient::get_current_timestamp() {
-    auto now = std::chrono::system_clock::now();
-    auto now_time_t = std::chrono::system_clock::to_time_t(now);
-    
-    std::stringstream ss;
-    ss << std::put_time(std::localtime(&now_time_t), "%Y-%m-%d %H:%M:%S");
-    
-    return ss.str();
+void MqttClient::set_message_callback(MessageCallback callback) {
+    message_callback_ = callback;
+    if (mosq_) {
+        mosquitto_message_callback_set(mosq_, on_message_callback);
+    }
 }
 
-std::string MqttClient::escape_json_string(const std::string& input) {
-    std::string output;
-    output.reserve(input.length() + 10); // Reserve some extra space
+bool MqttClient::subscribe(const std::string& topic) {
+    if (!mosq_ || !connected_) {
+        std::cerr << "Cannot subscribe: MQTT client not connected" << std::endl;
+        return false;
+    }
     
-    for (char c : input) {
-        switch (c) {
-            case '\"': output += "\\\""; break;
-            case '\\': output += "\\\\"; break;
-            case '\b': output += "\\b"; break;
-            case '\f': output += "\\f"; break;
-            case '\n': output += "\\n"; break;
-            case '\r': output += "\\r"; break;
-            case '\t': output += "\\t"; break;
-            default:
-                if ('\x00' <= c && c <= '\x1f') {
-                    // Escape control characters
-                    char buf[8];
-                    snprintf(buf, sizeof(buf), "\\u%04x", (int)c);
-                    output += buf;
-                } else {
-                    output += c;
-                }
+    try {
+        mosquitto_subscribe(mosq_, nullptr, topic.c_str(), 0); // QoS level 0
+        std::cout << "Subscribed to topic: " << topic << std::endl;
+        return true;
+    } catch (const std::exception& exc) {
+        std::cerr << "Error subscribing to topic " << topic << ": " << exc.what() << std::endl;
+        return false;
+    }
+}
+
+bool MqttClient::publish(const std::string& topic, const std::string& message) {
+    if (!mosq_ || !connected_) {
+        std::cerr << "Cannot publish: MQTT client not connected" << std::endl;
+        return false;
+    }
+    
+    try {
+        int rc = mosquitto_publish(mosq_, nullptr, topic.c_str(), 
+                                   message.length(), message.c_str(), 
+                                   0, false);
+        if (rc == MOSQ_ERR_SUCCESS) {
+            std::cout << "Published message to topic " << topic << std::endl;
+            return true;
+        } else {
+            std::cerr << "Error publishing to topic " << topic << ": " << mosquitto_strerror(rc) << std::endl;
+            return false;
         }
+    } catch (const std::exception& exc) {
+        std::cerr << "Error publishing to topic " << topic << ": " << exc.what() << std::endl;
+        return false;
     }
-    
-    return output;
 }
 
-std::string MqttClient::base64_encode(const std::vector<char>& input) {
-    if (input.empty()) {
-        return "";
+bool MqttClient::publish_image(const std::string& topic, const std::string& filename,
+                             const std::string& window_title, const std::string& trigger_type,
+                             bool as_base64) {
+    if (!mosq_ || !connected_) {
+        std::cerr << "❌ Cannot publish: MQTT client not connected" << std::endl;
+        return false;
     }
-    
-    // Ensure input size is within reasonable limits
-    if (input.size() > 20 * 1024 * 1024) { // 20MB limit
-        std::cerr << "❌ Input size too large for Base64 encoding" << std::endl;
-        return "";
+
+    std::ifstream file(filename, std::ios::binary);
+    if (!file) {
+        std::cerr << "❌ Failed to open image file: " << filename << std::endl;
+        return false;
     }
+
+    std::vector<unsigned char> buffer(std::istreambuf_iterator<char>(file), {});
     
+    std::string payload;
+    // Always encode image data as Base64 to ensure valid JSON
     BIO *bio, *b64;
     BUF_MEM *bufferPtr;
-    
+
     b64 = BIO_new(BIO_f_base64());
+    // Avoid newlines in base64 output
+    BIO_set_flags(b64, BIO_FLAGS_BASE64_NO_NL);
     bio = BIO_new(BIO_s_mem());
     bio = BIO_push(b64, bio);
-    
-    // Do not use newlines in the output - important for JSON embedding
-    BIO_set_flags(bio, BIO_FLAGS_BASE64_NO_NL);
-    
-    BIO_write(bio, input.data(), static_cast<int>(input.size()));
+
+    BIO_write(bio, buffer.data(), buffer.size());
     BIO_flush(bio);
     BIO_get_mem_ptr(bio, &bufferPtr);
-    
-    std::string result(bufferPtr->data, bufferPtr->length);
-    
+
+    payload.assign(bufferPtr->data, bufferPtr->length);
     BIO_free_all(bio);
+
+    // Build JSON with metadata and base64 image
+    // Get timestamp in ISO8601 UTC
+    auto now = std::chrono::system_clock::now();
+    std::time_t t = std::chrono::system_clock::to_time_t(now);
+    char tsbuf[20];
+    std::strftime(tsbuf, sizeof(tsbuf), "%FT%TZ", std::gmtime(&t));
+    // Extract just the filename
+    std::string fname = std::filesystem::path(filename).filename().string();
+    std::ostringstream ss;
+    ss << '{'
+       << "\"filename\":\"" << fname << "\","
+       << "\"window_title\":\"" << window_title << "\","
+       << "\"trigger_type\":\"" << trigger_type << "\","
+       << "\"timestamp\":\"" << tsbuf << "\","
+       << "\"image_data\":\"" << payload << "\""
+       << '}';
+    std::string message = ss.str();
+
+    int rc = mosquitto_publish(mosq_, nullptr, topic.c_str(), 
+                             message.length(), message.c_str(), 
+                             0, false);
     
-    return result;
+    if (rc != MOSQ_ERR_SUCCESS) {
+        std::cerr << "❌ Error publishing to topic " << topic << ": " << mosquitto_strerror(rc) << std::endl;
+        return false;
+    }
+
+    std::cout << "✅ Published image to topic " << topic << std::endl;
+    return true;
 }

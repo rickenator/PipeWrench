@@ -56,6 +56,8 @@ SauronWindow::SauronWindow()
     {
         auto lbl_host = Gtk::manage(new Gtk::Label("Host:"));
         mqtt_host_entry_.set_text("localhost");
+        mqtt_host_entry_.set_editable(true);
+        mqtt_host_entry_.set_sensitive(true);
         auto hb = Gtk::manage(new Gtk::Box(Gtk::ORIENTATION_HORIZONTAL, 5));
         hb->pack_start(*lbl_host, false, false);
         hb->pack_start(mqtt_host_entry_, true, true);
@@ -64,6 +66,8 @@ SauronWindow::SauronWindow()
     {
         auto lbl_port = Gtk::manage(new Gtk::Label("Port:"));
         mqtt_port_entry_.set_text("1883");
+        mqtt_port_entry_.set_editable(true);
+        mqtt_port_entry_.set_sensitive(true);
         auto hb = Gtk::manage(new Gtk::Box(Gtk::ORIENTATION_HORIZONTAL, 5));
         hb->pack_start(*lbl_port, false, false);
         hb->pack_start(mqtt_port_entry_, true, true);
@@ -71,10 +75,23 @@ SauronWindow::SauronWindow()
     }
     {
         auto lbl_topic = Gtk::manage(new Gtk::Label("Topic:"));
-        mqtt_topic_entry_.set_text("sauron/captures/image");
+        mqtt_topic_entry_.set_text("sauron/capture/image");
+        mqtt_topic_entry_.set_editable(true);
+        mqtt_topic_entry_.set_sensitive(true);
         auto hb = Gtk::manage(new Gtk::Box(Gtk::ORIENTATION_HORIZONTAL, 5));
         hb->pack_start(*lbl_topic, false, false);
         hb->pack_start(mqtt_topic_entry_, true, true);
+        mqtt_box_.pack_start(*hb, false, false);
+    }
+    {
+        auto lbl_cmd_topic = Gtk::manage(new Gtk::Label("Command Topic:"));
+        mqtt_command_topic_entry_.set_text("sauron/command");
+        mqtt_command_topic_entry_.set_tooltip_text("MQTT topic to listen for commands");
+        mqtt_command_topic_entry_.set_editable(true);
+        mqtt_command_topic_entry_.set_sensitive(true);
+        auto hb = Gtk::manage(new Gtk::Box(Gtk::ORIENTATION_HORIZONTAL, 5));
+        hb->pack_start(*lbl_cmd_topic, false, false);
+        hb->pack_start(mqtt_command_topic_entry_, true, true);
         mqtt_box_.pack_start(*hb, false, false);
     }
 
@@ -114,6 +131,9 @@ SauronWindow::SauronWindow()
 
     // Connect signals
     sauron_eye_panel_.signal_capture_taken().connect(sigc::mem_fun(*this, &SauronWindow::on_capture_taken));
+    // Handle captures from panel by publishing automatically via MQTT Settings
+    sauron_eye_panel_.signal_capture_taken_extended().connect(
+        sigc::mem_fun(*this, &SauronWindow::on_panel_capture));
 
     // Debug output setup
     debug_streambuf_ = new DebugStreambuf(this);
@@ -169,12 +189,23 @@ void SauronWindow::on_mqtt_connect_clicked() {
         status_bar_.push("Invalid port number");
         return;
     }
+    
+    std::cout << "Attempting to connect to MQTT broker at " << host << ":" << port << std::endl;
+
     if (!mqtt_connected_) {
-        if (mqtt_client_->connect("PipeWrenchClient_" + std::to_string(std::time(nullptr)), host, port)) {
+        if (mqtt_client_->connect(host, "PipeWrenchClient_" + std::to_string(std::time(nullptr)), port)) {
             mqtt_connected_ = true;
             mqtt_connect_button_.set_label("Disconnect");
             mqtt_status_label_.set_markup("<span foreground='green'>Connected</span>");
             status_bar_.push("Connected to MQTT broker at " + host + ":" + std::to_string(port));
+            
+            // Subscribe to command topic and set message handler
+            const auto command_topic = mqtt_command_topic_entry_.get_text();
+            mqtt_client_->set_message_callback(
+                sigc::mem_fun(*this, &SauronWindow::on_mqtt_message));
+            if (mqtt_client_->subscribe(command_topic)) {
+                status_bar_.push("Subscribed to command topic: " + command_topic);
+            }
         } else {
             status_bar_.push("Failed to connect to MQTT broker");
             mqtt_status_label_.set_markup("<span foreground='red'>Connection failed</span>");
@@ -186,6 +217,23 @@ void SauronWindow::on_mqtt_connect_clicked() {
         mqtt_status_label_.set_markup("<i>Not connected</i>");
         status_bar_.push("Disconnected from MQTT broker");
     }
+}
+
+void SauronWindow::on_mqtt_message(const std::string& topic, const std::string& payload) {
+    // Handle messages in the UI thread
+    Glib::signal_idle().connect_once([this, topic, payload]() {
+        if (topic == mqtt_command_topic_entry_.get_text()) {
+            handle_capture_command();
+        }
+    });
+}
+
+void SauronWindow::handle_capture_command() {
+    std::cout << "📸 Received capture command via MQTT" << std::endl;
+    sauron_eye_panel_.trigger_capture();
+    
+    // After capture is taken, the on_capture_taken handler will be called
+    // and it will update last_capture_path_. We'll send the image in that handler.
 }
 
 void SauronWindow::refresh_captures() {
@@ -243,9 +291,11 @@ void SauronWindow::add_thumbnail(const std::string& filepath) {
 }
 
 void SauronWindow::on_thumbnail_clicked(const std::string& filepath) {
+    const auto topic = mqtt_topic_entry_.get_text();
+    std::cout << "Publishing thumbnail to topic: " << topic << std::endl;
     if (mqtt_connected_) {
-        if (mqtt_client_->publish_image(mqtt_topic_entry_.get_text(), 
-                                      filepath, "", "manual", false)) {
+        if (mqtt_client_->publish_image(topic, 
+                                      filepath, "", "manual", true)) {
             status_bar_.push("Sent to MQTT: " + filepath);
         } else {
             status_bar_.push("Failed to send to MQTT: " + filepath);
@@ -288,10 +338,22 @@ void SauronWindow::on_thumbnail_activated_capture(const std::string& filepath) {
 void SauronWindow::on_send_clicked() {
     if (!last_capture_path_.empty() && mqtt_connected_) {
         if (mqtt_client_->publish_image(mqtt_topic_entry_.get_text(), 
-                                      last_capture_path_, "", "manual", false)) {
+                                      last_capture_path_, "", "manual", true)) {
             status_bar_.push("Sent latest capture to MQTT: " + last_capture_path_);
         } else {
             status_bar_.push("Failed to send latest capture to MQTT: " + last_capture_path_);
+        }
+    }
+}
+
+void SauronWindow::on_panel_capture(const std::string& filepath, const std::string& type, const std::string& id) {
+    if (mqtt_connected_ && !filepath.empty()) {
+        const auto topic = mqtt_topic_entry_.get_text();
+        // Always encode as Base64
+        if (mqtt_client_->publish_image(topic, filepath, "", type, true)) {
+            status_bar_.push("Sent capture to MQTT: " + filepath);
+        } else {
+            status_bar_.push("Failed to send capture to MQTT: " + filepath);
         }
     }
 }
