@@ -35,6 +35,14 @@ private:
     bool mqtt_connected_ = false;
     std::string last_capture_path_;
 
+    // Settings persistence
+    void load_settings();
+    void save_settings();
+    std::string orig_mqtt_host_;
+    std::string orig_mqtt_port_;
+    std::string orig_mqtt_topic_;
+    std::string orig_mqtt_command_topic_;
+
     // Main layout
     Gtk::Box main_box_{Gtk::ORIENTATION_VERTICAL};
     Gtk::Box content_box_{Gtk::ORIENTATION_HORIZONTAL};

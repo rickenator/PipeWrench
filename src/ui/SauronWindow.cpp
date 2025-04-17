@@ -5,6 +5,7 @@
 #include <ctime>
 #include <sstream>
 #include <iomanip>
+#include <glibmm/keyfile.h>  // for settings persistence
 
 SauronWindow::DebugStreambuf::DebugStreambuf(SauronWindow* window)
     : window_(window) {}
@@ -74,7 +75,7 @@ SauronWindow::SauronWindow()
         mqtt_box_.pack_start(*hb, false, false);
     }
     {
-        auto lbl_topic = Gtk::manage(new Gtk::Label("Topic:"));
+        auto lbl_topic = Gtk::manage(new Gtk::Label("Publish To:"));
         mqtt_topic_entry_.set_text("sauron/capture/image");
         mqtt_topic_entry_.set_editable(true);
         mqtt_topic_entry_.set_sensitive(true);
@@ -84,7 +85,7 @@ SauronWindow::SauronWindow()
         mqtt_box_.pack_start(*hb, false, false);
     }
     {
-        auto lbl_cmd_topic = Gtk::manage(new Gtk::Label("Command Topic:"));
+        auto lbl_cmd_topic = Gtk::manage(new Gtk::Label("Command From:"));
         mqtt_command_topic_entry_.set_text("sauron/command");
         mqtt_command_topic_entry_.set_tooltip_text("MQTT topic to listen for commands");
         mqtt_command_topic_entry_.set_editable(true);
@@ -139,6 +140,9 @@ SauronWindow::SauronWindow()
     debug_streambuf_ = new DebugStreambuf(this);
     cout_buffer_ = std::cout.rdbuf(debug_streambuf_);
 
+    // Load persisted settings if any
+    load_settings();
+
     // Initial setup
     ensure_captures_directory();
     refresh_captures();
@@ -177,8 +181,28 @@ void SauronWindow::on_capture_taken(const std::string& filename) {
 }
 
 // Handle key press and delete events
-bool SauronWindow::on_key_press_event(GdkEventKey* key_event) { return false; }
-bool SauronWindow::on_delete_event(GdkEventAny* event) { return false; }
+bool SauronWindow::on_key_press_event(GdkEventKey* key_event) { 
+    return Gtk::Window::on_key_press_event(key_event);
+}
+
+bool SauronWindow::on_delete_event(GdkEventAny* event) {
+    // Check for changes in MQTT settings
+    if (mqtt_host_entry_.get_text() != orig_mqtt_host_ ||
+        mqtt_port_entry_.get_text() != orig_mqtt_port_ ||
+        mqtt_topic_entry_.get_text() != orig_mqtt_topic_ ||
+        mqtt_command_topic_entry_.get_text() != orig_mqtt_command_topic_) {
+        Gtk::MessageDialog dlg(*this, "MQTT Settings: Save changes?", false,
+                               Gtk::MESSAGE_QUESTION, Gtk::BUTTONS_NONE);
+        dlg.add_button("OK", Gtk::RESPONSE_OK);
+        dlg.add_button("Quit", Gtk::RESPONSE_CANCEL);
+        int response = dlg.run();
+        if (response == Gtk::RESPONSE_OK) {
+            save_settings();
+        }
+    }
+    // Proceed with default destroy
+    return Gtk::Window::on_delete_event(event);
+}
 
 void SauronWindow::on_mqtt_connect_clicked() {
     const auto host = mqtt_host_entry_.get_text();
@@ -356,4 +380,47 @@ void SauronWindow::on_panel_capture(const std::string& filepath, const std::stri
             status_bar_.push("Failed to send capture to MQTT: " + filepath);
         }
     }
+}
+
+void SauronWindow::load_settings() {
+    Glib::KeyFile keyfile;
+    const std::string fname = "settings.ini";
+    if (Glib::file_test(fname, Glib::FILE_TEST_EXISTS)) {
+        try {
+            keyfile.load_from_file(fname);
+            auto host = keyfile.get_string("MQTT", "host");
+            auto port = keyfile.get_integer("MQTT", "port");
+            auto topic = keyfile.get_string("MQTT", "topic");
+            auto cmd = keyfile.get_string("MQTT", "command_topic");
+            mqtt_host_entry_.set_text(host);
+            mqtt_port_entry_.set_text(std::to_string(port));
+            mqtt_topic_entry_.set_text(topic);
+            mqtt_command_topic_entry_.set_text(cmd);
+        } catch (const Glib::Error& e) {
+            std::cerr << "Failed to load settings: " << e.what() << std::endl;
+        }
+    }
+    // Store original values
+    orig_mqtt_host_ = mqtt_host_entry_.get_text();
+    orig_mqtt_port_ = mqtt_port_entry_.get_text();
+    orig_mqtt_topic_ = mqtt_topic_entry_.get_text();
+    orig_mqtt_command_topic_ = mqtt_command_topic_entry_.get_text();
+}
+
+void SauronWindow::save_settings() {
+    Glib::KeyFile keyfile;
+    keyfile.set_string("MQTT", "host", mqtt_host_entry_.get_text());
+    keyfile.set_integer("MQTT", "port", std::stoi(mqtt_port_entry_.get_text()));
+    keyfile.set_string("MQTT", "topic", mqtt_topic_entry_.get_text());
+    keyfile.set_string("MQTT", "command_topic", mqtt_command_topic_entry_.get_text());
+    try {
+        keyfile.save_to_file("settings.ini");
+    } catch (const Glib::Error& e) {
+        std::cerr << "Failed to save settings: " << e.what() << std::endl;
+    }
+    // Update original values
+    orig_mqtt_host_ = mqtt_host_entry_.get_text();
+    orig_mqtt_port_ = mqtt_port_entry_.get_text();
+    orig_mqtt_topic_ = mqtt_topic_entry_.get_text();
+    orig_mqtt_command_topic_ = mqtt_command_topic_entry_.get_text();
 }
