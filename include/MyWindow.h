@@ -1,5 +1,5 @@
-#ifndef MYWINDOW_H
-#define MYWINDOW_H
+#ifndef SauronWindow_H
+#define SauronWindow_H
 
 #include <gtkmm.h>
 #include <memory>
@@ -14,10 +14,10 @@
 // Forward declarations
 struct WindowInfo;
 
-class MyWindow : public Gtk::Window {
+class SauronWindow : public Gtk::Window {
 public:
-    MyWindow();
-    virtual ~MyWindow();
+    SauronWindow();
+    virtual ~SauronWindow();
 
 protected:
     void add_thumbnail(const std::string& filepath);
@@ -27,11 +27,11 @@ private:
     // Debug streambuf class
     class DebugStreambuf : public std::streambuf {
     public:
-        DebugStreambuf(MyWindow* window);
+        DebugStreambuf(SauronWindow* window);
     protected:
         virtual int_type overflow(int_type c = traits_type::eof()) override;
     private:
-        MyWindow* window_;
+        SauronWindow* window_;
         std::string buffer_;
     };
 
@@ -93,4 +93,4 @@ private:
     void add_debug_text(const std::string& text);
 };
 
-#endif // MYWINDOW_H
+#endif // SauronWindow_H

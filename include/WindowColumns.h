@@ -24,7 +24,7 @@ public:
     Gtk::TreeModelColumn<Glib::ustring> m_col_title;
     Gtk::TreeModelColumn<unsigned long> m_col_id;
     Gtk::TreeModelColumn<Glib::ustring> m_col_size;
-    // columns for MyWindow
+    // columns for SauronWindow
     Gtk::TreeModelColumn<Glib::ustring> col_window_type;
     Gtk::TreeModelColumn<Glib::ustring> col_dimensions;
     Gtk::TreeModelColumn<Glib::ustring> col_position;

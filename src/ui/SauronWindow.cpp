@@ -1,4 +1,4 @@
-#include "SauronWindow.h"
+#include "../../include/SauronWindow.h"
 #include <iostream>
 #include <filesystem>
 #include <chrono>

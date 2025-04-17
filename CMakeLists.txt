@@ -100,7 +100,7 @@ set(MQTT_SOURCES
 )
 
 set(UI_SOURCES
-    src/ui/MyWindow.cpp
+    src/ui/SauronWindow.cpp
     src/ui/RecentCapturesPanel.cpp
     src/ui/SauronEyePanel.cpp
 )
