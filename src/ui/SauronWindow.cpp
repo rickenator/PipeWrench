@@ -6,6 +6,7 @@
 #include <sstream>
 #include <iomanip>
 #include <glibmm/keyfile.h>  // for settings persistence
+#include <nlohmann/json.hpp> // Add include for JSON parsing
 
 SauronWindow::DebugStreambuf::DebugStreambuf(SauronWindow* window)
     : window_(window) {}
@@ -25,6 +26,7 @@ SauronWindow::SauronWindow()
     : capturer_(std::make_shared<X11ScreenCapturer>()),
       mqtt_client_(std::make_shared<MqttClient>()),
       sauron_eye_panel_(capturer_, mqtt_client_),
+      chat_panel_(mqtt_client_),
       mqtt_connect_button_("Connect"),
       send_button_("Send Latest"),
       debug_buffer_(Gtk::TextBuffer::create())
@@ -75,26 +77,17 @@ SauronWindow::SauronWindow()
         mqtt_box_.pack_start(*hb, false, false);
     }
     {
-        auto lbl_topic = Gtk::manage(new Gtk::Label("Publish To:"));
-        mqtt_topic_entry_.set_text("sauron/capture/image");
-        mqtt_topic_entry_.set_editable(true);
+        auto lbl_topic = Gtk::manage(new Gtk::Label("Topic:"));
+        mqtt_topic_entry_.set_text("sauron");
+        mqtt_topic_entry_.set_tooltip_text("Unified MQTT topic for all communication");
+        mqtt_topic_entry_.set_editable(false); // Make it non-editable
         mqtt_topic_entry_.set_sensitive(true);
         auto hb = Gtk::manage(new Gtk::Box(Gtk::ORIENTATION_HORIZONTAL, 5));
         hb->pack_start(*lbl_topic, false, false);
         hb->pack_start(mqtt_topic_entry_, true, true);
         mqtt_box_.pack_start(*hb, false, false);
     }
-    {
-        auto lbl_cmd_topic = Gtk::manage(new Gtk::Label("Command From:"));
-        mqtt_command_topic_entry_.set_text("sauron/command");
-        mqtt_command_topic_entry_.set_tooltip_text("MQTT topic to listen for commands");
-        mqtt_command_topic_entry_.set_editable(true);
-        mqtt_command_topic_entry_.set_sensitive(true);
-        auto hb = Gtk::manage(new Gtk::Box(Gtk::ORIENTATION_HORIZONTAL, 5));
-        hb->pack_start(*lbl_cmd_topic, false, false);
-        hb->pack_start(mqtt_command_topic_entry_, true, true);
-        mqtt_box_.pack_start(*hb, false, false);
-    }
+    // Removed separate command topic entry - using unified topic
 
     mqtt_status_label_.set_markup("<i>Not connected</i>");
     mqtt_box_.pack_start(mqtt_status_label_, false, false);
@@ -116,6 +109,11 @@ SauronWindow::SauronWindow()
     open_folder_button_.signal_clicked().connect(sigc::mem_fun(*this, &SauronWindow::on_open_folder_clicked));
     captures_box_.pack_start(open_folder_button_, false, false);
     right_panel_.pack_start(captures_frame_, true, true);
+    
+    // Chat AI panel setup
+    chat_ai_frame_.add(chat_panel_);
+    
+    right_panel_.pack_start(chat_ai_frame_, true, true);
 
     // Debug view
     debug_view_.set_buffer(debug_buffer_);
@@ -151,6 +149,12 @@ SauronWindow::SauronWindow()
 
     // Load persisted settings if any
     load_settings();
+
+    // Automatically connect to MQTT on startup
+    Glib::signal_idle().connect_once([this]() {
+        std::cout << "🔌 Auto-connecting to MQTT..." << std::endl;
+        on_mqtt_connect_clicked();
+    });
 
     // Initial setup
     ensure_captures_directory();
@@ -201,9 +205,7 @@ bool SauronWindow::on_key_press_event(GdkEventKey* key_event) {
 bool SauronWindow::on_delete_event(GdkEventAny* event) {
     // Check for changes in MQTT settings
     if (mqtt_host_entry_.get_text() != orig_mqtt_host_ ||
-        mqtt_port_entry_.get_text() != orig_mqtt_port_ ||
-        mqtt_topic_entry_.get_text() != orig_mqtt_topic_ ||
-        mqtt_command_topic_entry_.get_text() != orig_mqtt_command_topic_) {
+        mqtt_port_entry_.get_text() != orig_mqtt_port_) {
         Gtk::MessageDialog dlg(*this, "MQTT Settings: Save changes?", false,
                                Gtk::MESSAGE_QUESTION, Gtk::BUTTONS_NONE);
         dlg.add_button("OK", Gtk::RESPONSE_OK);
@@ -236,12 +238,12 @@ void SauronWindow::on_mqtt_connect_clicked() {
             mqtt_status_label_.set_markup("<span foreground='green'>Connected</span>");
             status_bar_.push("Connected to MQTT broker at " + host + ":" + std::to_string(port));
             
-            // Subscribe to command topic and set message handler
-            const auto command_topic = mqtt_command_topic_entry_.get_text();
+            // Subscribe to unified topic and set message handler
+            const std::string unified_topic = "sauron";
             mqtt_client_->set_message_callback(
                 sigc::mem_fun(*this, &SauronWindow::on_mqtt_message));
-            if (mqtt_client_->subscribe(command_topic)) {
-                status_bar_.push("Subscribed to command topic: " + command_topic);
+            if (mqtt_client_->subscribe(unified_topic)) {
+                status_bar_.push("Subscribed to topic: " + unified_topic);
             }
         } else {
             status_bar_.push("Failed to connect to MQTT broker");
@@ -259,8 +261,17 @@ void SauronWindow::on_mqtt_connect_clicked() {
 void SauronWindow::on_mqtt_message(const std::string& topic, const std::string& payload) {
     // Handle messages in the UI thread
     Glib::signal_idle().connect_once([this, topic, payload]() {
-        if (topic == mqtt_command_topic_entry_.get_text()) {
-            handle_capture_command();
+        if (topic == "sauron") {
+            // Check if this is a command message
+            try {
+                auto j = nlohmann::json::parse(payload);
+                if (j.contains("type") && j["type"] == "capture_command" && 
+                    j.contains("to") && j["to"] == "ui") {
+                    handle_capture_command();
+                }
+            } catch (const std::exception& e) {
+                std::cerr << "Error parsing message: " << e.what() << std::endl;
+            }
         }
     });
 }
@@ -403,12 +414,11 @@ void SauronWindow::load_settings() {
             keyfile.load_from_file(fname);
             auto host = keyfile.get_string("MQTT", "host");
             auto port = keyfile.get_integer("MQTT", "port");
-            auto topic = keyfile.get_string("MQTT", "topic");
-            auto cmd = keyfile.get_string("MQTT", "command_topic");
             mqtt_host_entry_.set_text(host);
             mqtt_port_entry_.set_text(std::to_string(port));
-            mqtt_topic_entry_.set_text(topic);
-            mqtt_command_topic_entry_.set_text(cmd);
+            
+            // Always use "sauron" as the unified topic regardless of what's in the settings file
+            mqtt_topic_entry_.set_text("sauron");
         } catch (const Glib::Error& e) {
             std::cerr << "Failed to load settings: " << e.what() << std::endl;
         }
@@ -416,16 +426,15 @@ void SauronWindow::load_settings() {
     // Store original values
     orig_mqtt_host_ = mqtt_host_entry_.get_text();
     orig_mqtt_port_ = mqtt_port_entry_.get_text();
-    orig_mqtt_topic_ = mqtt_topic_entry_.get_text();
-    orig_mqtt_command_topic_ = mqtt_command_topic_entry_.get_text();
+    // No need to store topic value as it's fixed
 }
 
 void SauronWindow::save_settings() {
     Glib::KeyFile keyfile;
     keyfile.set_string("MQTT", "host", mqtt_host_entry_.get_text());
     keyfile.set_integer("MQTT", "port", std::stoi(mqtt_port_entry_.get_text()));
-    keyfile.set_string("MQTT", "topic", mqtt_topic_entry_.get_text());
-    keyfile.set_string("MQTT", "command_topic", mqtt_command_topic_entry_.get_text());
+    keyfile.set_string("MQTT", "topic", "sauron"); // Always save the unified topic
+    
     try {
         keyfile.save_to_file("settings.ini");
     } catch (const Glib::Error& e) {
@@ -434,8 +443,7 @@ void SauronWindow::save_settings() {
     // Update original values
     orig_mqtt_host_ = mqtt_host_entry_.get_text();
     orig_mqtt_port_ = mqtt_port_entry_.get_text();
-    orig_mqtt_topic_ = mqtt_topic_entry_.get_text();
-    orig_mqtt_command_topic_ = mqtt_command_topic_entry_.get_text();
+    // No need to track topic values as they're fixed
 }
 
 void SauronWindow::on_keyboard_capture_triggered() {

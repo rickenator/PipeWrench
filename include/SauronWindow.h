@@ -7,6 +7,7 @@
 #include "MqttClient.h"
 #include "SauronEyePanel.h"
 #include "KeyboardController.h"
+#include "ChatPanel.h"
 
 class SauronWindow : public Gtk::Window {
 public:
@@ -37,6 +38,7 @@ private:
     std::shared_ptr<X11ScreenCapturer> capturer_;
     std::shared_ptr<MqttClient> mqtt_client_;
     SauronEyePanel sauron_eye_panel_;
+    ChatPanel chat_panel_;
     KeyboardController keyboard_controller_;
     bool mqtt_connected_ = false;
     std::string last_capture_path_;
@@ -47,7 +49,7 @@ private:
     std::string orig_mqtt_host_;
     std::string orig_mqtt_port_;
     std::string orig_mqtt_topic_;
-    std::string orig_mqtt_command_topic_;
+    // Removed: std::string orig_mqtt_command_topic_;
 
     // Main layout
     Gtk::Box main_box_{Gtk::ORIENTATION_VERTICAL};
@@ -61,8 +63,7 @@ private:
     Gtk::Entry mqtt_host_entry_;
     Gtk::Entry mqtt_port_entry_;
     Gtk::Entry mqtt_topic_entry_;
-    Gtk::Entry mqtt_command_topic_entry_;
-    Gtk::Label mqtt_command_topic_label_{"Command Topic"};
+    // Removed: mqtt_command_topic_entry_ - using unified topic
     Gtk::Label mqtt_status_label_;
     Gtk::Button mqtt_connect_button_;
     Gtk::Button send_button_;
@@ -73,6 +74,11 @@ private:
     Gtk::ScrolledWindow captures_scroll_;
     Gtk::FlowBox captures_flow_;
     Gtk::Button open_folder_button_{"Open Folder"};
+    
+    // Chat panel for AI interaction
+    Gtk::Frame chat_ai_frame_{"AI Chat"};
+    Gtk::Button start_agent_button_{"Start AI Agent"};
+    Gtk::Button agent_settings_button_{"Configure Agent"};
 
     // Preview panel
     Gtk::Box bottom_box_{Gtk::ORIENTATION_HORIZONTAL};
@@ -91,27 +97,29 @@ private:
 
     // Helper methods
     void add_debug_text(const std::string& text);
+    
+    // GUI event handlers
+    void on_capture_taken(const std::string& filename);
+    void on_mqtt_connect_clicked();
+    void on_mqtt_message(const std::string& topic, const std::string& payload);
+    void on_panel_capture(const std::string& filepath, const std::string& type, const std::string& id);
+    void on_thumbnail_clicked(const std::string& filepath);
+    void on_thumbnail_activated_capture(const std::string& filepath);
+    void on_send_clicked();
+    void on_open_folder_clicked();
+    
+    // AI agent methods
+    void on_start_agent_clicked();
+    void on_agent_settings_clicked();
+    
+    // Utility methods
     bool ensure_captures_directory();
+    void handle_capture_command();
     void refresh_captures();
     void add_thumbnail(const std::string& filepath);
 
-    // Event handlers
-    void on_capture_taken(const std::string& filename);
-    void on_mqtt_connect_clicked();
-    void on_thumbnail_clicked(const std::string& filepath);
-    void on_thumbnail_activated_capture(const std::string& filepath);
-    void on_open_folder_clicked();
-    void on_send_clicked();
-    void on_mqtt_message(const std::string& topic, const std::string& payload);
-
     // Callback for preview updates
     void on_preview_update(const Glib::RefPtr<Gdk::Pixbuf>& pixbuf);
-
-    // Helper methods
-    void handle_capture_command();
-    void handle_mqtt_command(const std::string& command);
-    // Handle captures emitted by SauronEyePanel with extended signal
-    void on_panel_capture(const std::string& filepath, const std::string& type, const std::string& id);
 
     // Helper to load pixbuf from file
     Glib::RefPtr<Gdk::Pixbuf> load_pixbuf_or_blank(const std::string& filepath, int max_width, int max_height);
