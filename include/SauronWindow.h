@@ -6,6 +6,7 @@
 #include "X11ScreenCapturer.h"
 #include "MqttClient.h"
 #include "SauronEyePanel.h"
+#include "KeyboardController.h"
 
 class SauronWindow : public Gtk::Window {
 public:
@@ -16,6 +17,9 @@ protected:
     // Event handlers
     bool on_key_press_event(GdkEventKey* key_event) override;
     bool on_delete_event(GdkEventAny* event) override;
+    
+    // Keyboard shortcut handler
+    void on_keyboard_capture_triggered();
 
 private:
     // Debug stream buffer for redirecting cout
@@ -33,6 +37,7 @@ private:
     std::shared_ptr<X11ScreenCapturer> capturer_;
     std::shared_ptr<MqttClient> mqtt_client_;
     SauronEyePanel sauron_eye_panel_;
+    KeyboardController keyboard_controller_;
     bool mqtt_connected_ = false;
     std::string last_capture_path_;
 

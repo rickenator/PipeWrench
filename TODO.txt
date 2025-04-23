@@ -1,20 +1,45 @@
-Refactor: 
-    Break pipewrence up into separable class files. 
-    Rename the executable to sauron and any references to pipewrench or PipeWrench are now sauron. 
-        The title bar can read "Sauron's Eye"
+// Project: SauronEye
 
-Feature updates:
+// Keyboard Control: Will block Numpad Enter key events and use it to trigger
+// a capture event. This is a simple example of how to block a key event in X11.
 
-    Look at the SauronEye directory for starters. It includes the AI router and the keyboard 
-        interposer.
-    The router needs to be cleaned up since all the capture interface is on sauron in the C++ 
-        side, while sauron will need to implement the commands received from the keyboard 
-        related to capture/send. The main reason for keeping this code python is debatable
-        since all the AI interfaces are wrappers around HTTP. One idea worth considering is
-        if utilities like LangChain are useful and why if the functionality can be done in C++
-        easily it should be. Like why not make a vector store locally in C++ ? that would be
-        impressive.
-    Some commands from the keyboard are for the use of the AI router's chat 
-        interface, in particular to scroll the text area. Some are for the capture UI.
-        This will also need to be part of the AI router clean up.
+#include <X11/Xlib.h>
+#include <X11/keysym.h>
+#include <iostream>
+
+int main() {
+    Display* display = XOpenDisplay(nullptr);
+    if (!display) {
+        std::cerr << "Failed to open X display\n";
+        return 1;
+    }
+
+    Window root = DefaultRootWindow(display);
+    int keycode = XKeysymToKeycode(display, XK_KP_Enter);
+
+    // Grab Numpad Enter with any modifier (e.g., NumLock, Shift)
+    for (int mod = 0; mod < (1 << 3); ++mod) {
+        XGrabKey(display, keycode, mod, root, True, GrabModeAsync, GrabModeAsync);
+    }
+
+    XSelectInput(display, root, KeyPressMask);
+
+    std::cout << "Listening for Numpad Enter. Press Ctrl+C to exit.\n";
+
+    XEvent ev;
+    while (true) {
+        XNextEvent(display, &ev);
+
+        if (ev.type == KeyPress && ev.xkey.keycode == keycode) {
+            std::cout << "Blocked Numpad Enter\n";
+            // Don't re-emit the event → effectively blocks it
+        }
+    }
+
+    XCloseDisplay(display);
+    return 0;
+}
+
+
+
 

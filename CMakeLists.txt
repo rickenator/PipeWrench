@@ -99,6 +99,10 @@ set(MQTT_SOURCES
     src/mqtt/MqttClient.cpp
 )
 
+set(INPUT_SOURCES
+    src/input/KeyboardController.cpp
+)
+
 set(UI_SOURCES
     src/ui/SauronWindow.cpp
     src/ui/RecentCapturesPanel.cpp
@@ -114,6 +118,7 @@ add_executable(sauron
     ${MAIN_SOURCES}
     ${CAPTURE_SOURCES}
     ${MQTT_SOURCES}
+    ${INPUT_SOURCES}
     ${UI_SOURCES}
 )
 

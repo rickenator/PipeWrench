@@ -135,6 +135,15 @@ SauronWindow::SauronWindow()
     // Handle captures from panel by publishing automatically via MQTT Settings
     sauron_eye_panel_.signal_capture_taken_extended().connect(
         sigc::mem_fun(*this, &SauronWindow::on_panel_capture));
+        
+    // Initialize keyboard shortcuts
+    keyboard_controller_.signal_capture_key_pressed().connect(
+        sigc::mem_fun(*this, &SauronWindow::on_keyboard_capture_triggered));
+    if (keyboard_controller_.start_monitoring()) {
+        std::cout << "🔑 Keyboard shortcuts enabled (Numpad Enter to capture)" << std::endl;
+    } else {
+        std::cout << "⚠️ Keyboard shortcuts could not be enabled" << std::endl;
+    }
 
     // Debug output setup
     debug_streambuf_ = new DebugStreambuf(this);
@@ -149,6 +158,10 @@ SauronWindow::SauronWindow()
 }
 
 SauronWindow::~SauronWindow() {
+    // Stop keyboard monitoring before cleaning up
+    keyboard_controller_.stop_monitoring();
+    
+    // Restore original streams
     std::cout.rdbuf(cout_buffer_);
     delete debug_streambuf_;
 }
@@ -423,4 +436,13 @@ void SauronWindow::save_settings() {
     orig_mqtt_port_ = mqtt_port_entry_.get_text();
     orig_mqtt_topic_ = mqtt_topic_entry_.get_text();
     orig_mqtt_command_topic_ = mqtt_command_topic_entry_.get_text();
+}
+
+void SauronWindow::on_keyboard_capture_triggered() {
+    // Flash the status bar as visual feedback
+    status_bar_.push("⌨️ Capture triggered by keyboard shortcut (Numpad Enter)");
+    
+    // Use the same trigger mechanism as MQTT commands
+    std::cout << "📸 Keyboard shortcut triggered capture" << std::endl;
+    sauron_eye_panel_.trigger_capture("keyboard");
 }
