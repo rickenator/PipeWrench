@@ -3,13 +3,15 @@
 #include <iostream>
 #include <X11/extensions/Xrandr.h>
 #include <X11/extensions/Xcomposite.h>
+#include <X11/Xatom.h>  // For X11 property atoms
 #include <cairo/cairo.h>
 #include <cairo/cairo-xlib.h>
 #include <algorithm>
 #include <filesystem>
 #include <sys/stat.h>
+#include <glibmm/main.h>  // For Glib::signal_timeout
 
-X11ScreenCapturer::X11ScreenCapturer() {
+X11ScreenCapturer::X11ScreenCapturer() : monitoring_window_events_(false) {
     display = XOpenDisplay(nullptr);
     if (!display) {
         std::cerr << "❌ Failed to open X display" << std::endl;
@@ -17,6 +19,9 @@ X11ScreenCapturer::X11ScreenCapturer() {
 }
 
 X11ScreenCapturer::~X11ScreenCapturer() {
+    // Stop monitoring before closing display
+    stop_window_events_monitoring();
+    
     if (display) {
         XCloseDisplay(display);
     }
@@ -433,4 +438,126 @@ bool X11ScreenCapturer::save_image_to_png(XImage* image, const std::string& file
     
     std::cout << "✅ Image saved to PNG: " << filename << std::endl;
     return true;
+}
+
+bool X11ScreenCapturer::start_window_events_monitoring() {
+    if (!display) {
+        std::cerr << "❌ Cannot start monitoring window events: No X display connection" << std::endl;
+        return false;
+    }
+    
+    if (monitoring_window_events_) {
+        // Already monitoring
+        return true;
+    }
+    
+    // Register for window property change and structure notifications
+    register_for_window_events();
+    
+    // Start a timer to check for X11 events
+    event_check_connection_ = Glib::signal_timeout().connect(
+        sigc::mem_fun(*this, &X11ScreenCapturer::process_x11_events),
+        100); // Check every 100ms
+    
+    monitoring_window_events_ = true;
+    std::cout << "✅ Started monitoring window events" << std::endl;
+    
+    return true;
+}
+
+void X11ScreenCapturer::stop_window_events_monitoring() {
+    if (!monitoring_window_events_) {
+        return;
+    }
+    
+    // Disconnect the event check timer
+    if (event_check_connection_.connected()) {
+        event_check_connection_.disconnect();
+    }
+    
+    monitoring_window_events_ = false;
+    std::cout << "✅ Stopped monitoring window events" << std::endl;
+}
+
+bool X11ScreenCapturer::is_monitoring_window_events() const {
+    return monitoring_window_events_;
+}
+
+void X11ScreenCapturer::register_for_window_events() {
+    if (!display) {
+        return;
+    }
+    
+    Window root = DefaultRootWindow(display);
+    
+    // Select events on the root window
+    XSelectInput(display, root, SubstructureNotifyMask | PropertyChangeMask);
+    
+    // Also select events on all existing windows
+    Window root_return, parent_return;
+    Window* children;
+    unsigned int num_children;
+    
+    if (XQueryTree(display, root, &root_return, &parent_return, &children, &num_children)) {
+        for (unsigned int i = 0; i < num_children; i++) {
+            XSelectInput(display, children[i], PropertyChangeMask | StructureNotifyMask);
+        }
+        XFree(children);
+    }
+    
+    // Flush to ensure events are registered
+    XFlush(display);
+}
+
+bool X11ScreenCapturer::process_x11_events() {
+    if (!display || !monitoring_window_events_) {
+        return false;  // Stop this timer
+    }
+    
+    bool window_list_changed = false;
+    
+    // Check for pending X events
+    while (XPending(display)) {
+        XEvent event;
+        XNextEvent(display, &event);
+        
+        // Handle different event types
+        switch (event.type) {
+            case CreateNotify:
+                std::cout << "🪟 Window created: " << event.xcreatewindow.window << std::endl;
+                window_list_changed = true;
+                break;
+                
+            case DestroyNotify:
+                std::cout << "🪟 Window destroyed: " << event.xdestroywindow.window << std::endl;
+                window_list_changed = true;
+                break;
+                
+            case PropertyNotify:
+                // Only care about property changes that would affect the window list
+                if (event.xproperty.atom == XInternAtom(display, "WM_NAME", False) ||
+                    event.xproperty.atom == XInternAtom(display, "_NET_WM_NAME", False)) {
+                    std::cout << "🪟 Window title changed" << std::endl;
+                    window_list_changed = true;
+                }
+                break;
+                
+            case MapNotify:
+                std::cout << "🪟 Window mapped (shown): " << event.xmap.window << std::endl;
+                window_list_changed = true;
+                break;
+                
+            case UnmapNotify:
+                std::cout << "🪟 Window unmapped (hidden): " << event.xunmap.window << std::endl;
+                window_list_changed = true;
+                break;
+        }
+    }
+    
+    // Emit signal if window list changed
+    if (window_list_changed) {
+        m_signal_window_list_changed.emit();
+    }
+    
+    return true;  // Continue this timer
 }

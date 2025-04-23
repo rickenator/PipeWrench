@@ -180,18 +180,43 @@ SauronEyePanel::SauronEyePanel(std::shared_ptr<X11ScreenCapturer> capturer,
     refresh_window_list();
     refresh_screen_list();
     
+    // Start monitoring window events for automatic refresh
+    if (screen_capturer_->start_window_events_monitoring()) {
+        // Connect to the window list changed signal
+        screen_capturer_->signal_window_list_changed().connect(
+            sigc::mem_fun(*this, &SauronEyePanel::refresh_window_list));
+        std::cout << "✅ Connected to window events for automatic refresh" << std::endl;
+    } else {
+        std::cout << "⚠️ Automatic window list refresh not available" << std::endl;
+        // Fall back to periodic refresh
+        auto_refresh_connection_ = Glib::signal_timeout().connect(
+            sigc::mem_fun(*this, &SauronEyePanel::auto_refresh),
+            auto_refresh_interval_sec_ * 1000);
+    }
+    
     show_all_children();
-
-    // Set up auto-refresh for window and screen lists
-    auto_refresh_connection_ = Glib::signal_timeout().connect_seconds(
-        sigc::mem_fun(*this, &SauronEyePanel::auto_refresh),
-        auto_refresh_interval_sec_);
 }
 
 SauronEyePanel::~SauronEyePanel() {
+    // Clean up the auto refresh timer if it's active
+    if (auto_refresh_connection_.connected()) {
+        auto_refresh_connection_.disconnect();
+    }
+    
+    // Stop window event monitoring
+    if (screen_capturer_ && screen_capturer_->is_monitoring_window_events()) {
+        screen_capturer_->stop_window_events_monitoring();
+    }
 }
 
 void SauronEyePanel::refresh_window_list() {
+    auto selection = windows_tree_view_.get_selection();
+    Gtk::TreeModel::iterator sel_iter = selection->get_selected();
+    unsigned long preserved_id = 0;
+    if (sel_iter) {
+        preserved_id = (*sel_iter)[windows_columns_.m_col_id];
+    }
+
     windows_list_store_->clear();
     
     auto windows = screen_capturer_->list_windows();
@@ -218,6 +243,11 @@ void SauronEyePanel::refresh_window_list() {
         std::string size_str = std::to_string(window_info.width) + "×" + 
                               std::to_string(window_info.height);
         row[windows_columns_.m_col_size] = size_str;
+
+        // Reselect if this was previously selected
+        if (window_info.id == preserved_id) {
+            selection->select(row);
+        }
     }
 }
 

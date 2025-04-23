@@ -2,6 +2,7 @@
 #define SAURON_WINDOW_H
 
 #include <gtkmm.h>
+#include <gtkmm/image.h>
 #include "X11ScreenCapturer.h"
 #include "MqttClient.h"
 #include "SauronEyePanel.h"
@@ -68,6 +69,11 @@ private:
     Gtk::FlowBox captures_flow_;
     Gtk::Button open_folder_button_{"Open Folder"};
 
+    // Preview panel
+    Gtk::Box bottom_box_{Gtk::ORIENTATION_HORIZONTAL};
+    Gtk::Frame preview_frame_{"Preview"};
+    Gtk::Image preview_image_;
+
     // Debug output
     Gtk::ScrolledWindow debug_window_;
     Gtk::TextView debug_view_;
@@ -93,11 +99,17 @@ private:
     void on_send_clicked();
     void on_mqtt_message(const std::string& topic, const std::string& payload);
 
+    // Callback for preview updates
+    void on_preview_update(const Glib::RefPtr<Gdk::Pixbuf>& pixbuf);
+
     // Helper methods
     void handle_capture_command();
     void handle_mqtt_command(const std::string& command);
     // Handle captures emitted by SauronEyePanel with extended signal
     void on_panel_capture(const std::string& filepath, const std::string& type, const std::string& id);
+
+    // Helper to load pixbuf from file
+    Glib::RefPtr<Gdk::Pixbuf> load_pixbuf_or_blank(const std::string& filepath, int max_width, int max_height);
 };
 
 #endif // SAURON_WINDOW_H
