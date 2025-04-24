@@ -138,7 +138,7 @@ void ChatPanel::setup_ui() {
     messages_box_.set_orientation(Gtk::ORIENTATION_VERTICAL);
     messages_scrolled_window_.set_policy(Gtk::POLICY_AUTOMATIC, Gtk::POLICY_AUTOMATIC);
     messages_scrolled_window_.add(messages_box_);
-    messages_scrolled_window_.set_min_content_height(300);
+    messages_scrolled_window_.set_min_content_height(100); // Further reduced minimum height (e.g., 100 pixels)
     chat_frame_.add(messages_scrolled_window_);
     
     // Set up input area

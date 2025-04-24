@@ -7,6 +7,8 @@
 #include <iomanip>
 #include <glibmm/keyfile.h>  // for settings persistence
 #include <nlohmann/json.hpp> // Add include for JSON parsing
+#include <gdkmm/screen.h> // Include for screen dimensions
+#include <algorithm>      // Include for std::min
 
 SauronWindow::DebugStreambuf::DebugStreambuf(SauronWindow* window)
     : window_(window) {}
@@ -31,7 +33,26 @@ SauronWindow::SauronWindow()
       debug_buffer_(Gtk::TextBuffer::create())
 {
     set_title("Sauron's Eye");
-    set_default_size(1024, 768);
+
+    // Get screen dimensions
+    Glib::RefPtr<Gdk::Screen> screen = Gdk::Screen::get_default();
+    int screen_height = screen ? screen->get_height() : 768; // Default to 768 if screen is null
+    int screen_width = screen ? screen->get_width() : 1024; // Default to 1024 if screen is null
+
+    // Define desired initial size and margin
+    int desired_width = 1024;
+    int desired_height = 768;
+    int margin = 150; // Increased margin for taskbars, window decorations etc.
+
+    // Clamp initial size to screen dimensions minus margin
+    int initial_width = std::min(desired_width, screen_width - margin);
+    int initial_height = std::min(desired_height, screen_height - margin);
+
+    // Ensure minimum reasonable size
+    initial_width = std::max(initial_width, 600);
+    initial_height = std::max(initial_height, 300); // Reduced minimum height
+
+    set_default_size(initial_width, initial_height);
     set_border_width(10);
 
     // Main layout setup
@@ -107,8 +128,8 @@ SauronWindow::SauronWindow()
     captures_frame_.add(captures_box_);
     captures_scroll_.set_policy(Gtk::POLICY_NEVER, Gtk::POLICY_AUTOMATIC);
     captures_scroll_.add(captures_flow_);
-    // Set a minimum height for the captures area to make it taller
-    captures_scroll_.set_min_content_height(300); // Increased height
+    // Set a minimum height for the captures area
+    captures_scroll_.set_min_content_height(150); // Reduced height
     captures_flow_.set_valign(Gtk::ALIGN_START);
     captures_flow_.set_max_children_per_line(2);
     captures_flow_.set_selection_mode(Gtk::SELECTION_SINGLE);
@@ -123,13 +144,14 @@ SauronWindow::SauronWindow()
     // Chat AI panel setup
     chat_ai_frame_.add(chat_panel_);
     
-    right_panel_.pack_start(chat_ai_frame_, true, true);
+    // Pack with expand=true, fill=false
+    right_panel_.pack_start(chat_ai_frame_, true, false); 
 
     // Debug view
     debug_view_.set_buffer(debug_buffer_);
     debug_window_.add(debug_view_);
     debug_window_.set_policy(Gtk::POLICY_AUTOMATIC, Gtk::POLICY_AUTOMATIC);
-    debug_window_.set_min_content_height(100);
+    debug_window_.set_min_content_height(50); // Reduced height
     main_box_.pack_start(debug_window_, true, false);
 
     // Status bar at the very bottom
