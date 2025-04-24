@@ -56,7 +56,6 @@ ChatPanel::ChatPanel(std::shared_ptr<MqttClient> mqtt_client)
       load_conversation_button_("Load"),
       // status_label_ (default constructor)
       mqtt_client_(mqtt_client) // Initialize mqtt_client_ last as per declaration order
-      // active_conversation_id_, agent_connected_, etc. have defaults or are set later
 {
     setup_ui();
     
@@ -79,12 +78,12 @@ void ChatPanel::setup_ui() {
     // Set up CSS for message styling
     css_provider_ = Gtk::CssProvider::create();
     try {
-        // Use simplified CSS for testing
+        // Use updated CSS for better readability
         css_provider_->load_from_data(
-            ".user-message { background-color: blue; }\n"
-            ".assistant-message { background-color: grey; }\n"
-            ".system-message { font-style: italic; }\n"
-            ".timestamp { font-size: small; }"
+            ".user-message { background-color: #e3f2fd; padding: 5px; margin: 3px; border-radius: 5px; }\n" // Light blue background for user
+            ".assistant-message { background-color: #f1f1f1; padding: 5px; margin: 3px; border-radius: 5px; }\n" // Light grey background for assistant
+            ".system-message { font-style: italic; color: #666; margin: 5px 0; }\n" // Italic grey for system
+            ".timestamp { font-size: small; color: #9e9e9e; }"
         );
     } catch (const Gtk::CssProviderError& e) {
         // Print specific CSS error
@@ -174,9 +173,14 @@ void ChatPanel::setup_ui() {
 }
 
 bool ChatPanel::on_key_press_event(GdkEventKey* event) {
-    // Send message on Ctrl+Enter
-    if (event->keyval == GDK_KEY_Return && 
-        (event->state & GDK_CONTROL_MASK)) {
+    // Send message on Enter (but not Shift+Enter which inserts a new line)
+    if (event->keyval == GDK_KEY_Return) {
+        // If Shift is pressed, allow default behavior (new line)
+        if (event->state & GDK_SHIFT_MASK) {
+            return false;
+        }
+        // If Control is pressed, also send
+        // Otherwise (plain Enter), send the message
         send_message();
         return true;
     }
@@ -185,11 +189,8 @@ bool ChatPanel::on_key_press_event(GdkEventKey* event) {
 
 void ChatPanel::on_new_conversation_clicked() {
     if (!is_connected_to_agent()) {
-        connect_to_agent();
-        if (!agent_connected_) {
-            add_system_message("Could not connect to AI agent. Please check if SauronAgent is running.");
-            return;
-        }
+        add_system_message("Could not connect to AI agent. Please check if SauronAgent is running.");
+        return;
     }
     
     // Send request to create a new conversation using nlohmann::json
@@ -221,11 +222,8 @@ void ChatPanel::on_save_conversation_clicked() {
 
 void ChatPanel::on_load_conversation_clicked() {
     if (!is_connected_to_agent()) {
-        connect_to_agent();
-        if (!agent_connected_) {
-            add_system_message("Could not connect to AI agent. Please check if SauronAgent is running.");
-            return;
-        }
+        add_system_message("Could not connect to AI agent. Please check if SauronAgent is running.");
+        return;
     }
     
     // Request list of conversations using nlohmann::json
@@ -311,13 +309,14 @@ void ChatPanel::send_message() {
     if (text.empty()) {
         return;  // Don't send empty messages
     }
+    
+    // Clear input right away to prevent duplicate sends
+    input_buffer_->set_text("");
 
+    // Check if we're connected to MQTT before attempting to send
     if (!is_connected_to_agent()) {
-        connect_to_agent();
-        if (!agent_connected_) {
-            add_system_message("Could not connect to AI agent. Please check if SauronAgent is running.");
-            return;
-        }
+        add_system_message("Cannot send message: Not connected to MQTT broker.");
+        return;
     }
 
     // If we have a new conversation
@@ -334,8 +333,8 @@ void ChatPanel::send_message() {
     nlohmann::json message_json;
     message_json["to"] = "agent";
     message_json["from"] = "ui";
-    message_json["type"] = "user_message";
-    message_json["message"] = text; // nlohmann::json handles string escaping
+    message_json["type"] = "text"; // Changed from "user_message" to "text" as requested
+    message_json["data"] = text; // Use "data" field instead of "message" for text content
     
     // Include conversation ID if available
     if (active_conversation_id_ >= 0) {
@@ -344,11 +343,12 @@ void ChatPanel::send_message() {
 
     std::string message_str = message_json.dump();
 
+    std::cout << "DEBUG: Attempting to send message directly: " << message_str << std::endl;
     if (mqtt_client_->publish("sauron", message_str)) { // Use unified topic
-        // Clear input after sending
-        input_buffer_->set_text("");
+        std::cout << "DEBUG: Successfully published message" << std::endl;
         selected_image_path_ = "";
     } else {
+        std::cout << "DEBUG: Failed to publish message" << std::endl;
         add_system_message("Failed to send message to AI agent.");
     }
 }
@@ -445,12 +445,6 @@ void ChatPanel::on_mqtt_message(const std::string& topic, const std::string& pay
                       add_system_message("Received empty or invalid conversation list data.");
                  }
              });
-        } else if (type == "pong") {
-            Glib::signal_idle().connect_once([this]() {
-                agent_connected_ = true;
-                status_label_.set_markup("<span foreground='green'>Connected to AI agent</span>");
-                add_system_message("Agent connection confirmed (pong received).");
-            });
         } else if (type == "error") {
             std::string error_message = get_string(json_payload, "message", "Unknown error from agent.");
             Glib::signal_idle().connect_once([this, error_message]() {
@@ -502,6 +496,7 @@ void ChatPanel::add_system_message(const std::string& text) {
 }
 
 void ChatPanel::add_message_to_ui(const ChatMessage& message) {
+    std::cout << "DEBUG: add_message_to_ui called for source " << static_cast<int>(message.source) << " with text: \"" << message.text << "\"" << std::endl; // DEBUG ADDED
     // Create message container
     auto msg_box = Gtk::manage(new Gtk::Box(Gtk::ORIENTATION_VERTICAL, 2));
     
@@ -642,28 +637,8 @@ void ChatPanel::add_capture_message(const std::string& filepath) {
 }
 
 bool ChatPanel::is_connected_to_agent() {
-    return agent_connected_ && mqtt_client_ && mqtt_client_->is_connected();
-}
-
-void ChatPanel::connect_to_agent() {
-    if (!mqtt_client_ || !mqtt_client_->is_connected()) {
-        add_system_message("MQTT client not connected.");
-        return;
-    }
-    
-    // Send a ping to check if agent is running using nlohmann::json
-    nlohmann::json ping_json;
-    ping_json["to"] = "agent";
-    ping_json["from"] = "ui";
-    ping_json["type"] = "ping";
-
-    std::string ping_str = ping_json.dump();
-
-    if (mqtt_client_->publish("sauron", ping_str)) { // Use unified topic
-        add_system_message("Connecting to AI agent...");
-    } else {
-        add_system_message("Failed to send ping to AI agent.");
-    }
+    // Only check if MQTT client is connected
+    return mqtt_client_ && mqtt_client_->is_connected();
 }
 
 std::string ChatPanel::ChatMessage::get_css_class() const {

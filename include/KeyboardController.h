@@ -58,7 +58,7 @@ private:
     sigc::connection event_check_connection_;
     
     // Key grabbing
-    int numpad_enter_keycode_;
+    unsigned int numpad_enter_keycode_;
     std::vector<int> grabbed_modifiers_;
     
     // Signals

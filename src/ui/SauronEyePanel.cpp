@@ -287,7 +287,15 @@ void SauronEyePanel::on_capture_window_clicked() {
         Gtk::TreeModel::Row row = *iter;
         unsigned long window_id = row[windows_columns_.m_col_id];
         
-        take_capture("window", window_id);
+        std::string filepath = take_capture("window", window_id);
+        if (!filepath.empty() && mqtt_client_) {
+            std::string topic = "sauron"; // Use unified MQTT topic
+            bool use_base64 = true;
+            // Pass routing info properly encoded
+            std::string routing = "to:agent,from:ui,type:image";
+            mqtt_client_->publish_image(topic, filepath, routing, "window", use_base64);
+            std::cout << "✅ Published capture to MQTT: " << filepath << std::endl;
+        }
     } else {
         std::cerr << "❌ No window selected" << std::endl;
     }
@@ -306,7 +314,15 @@ void SauronEyePanel::on_capture_screen_clicked() {
         int screen_id = row[screens_columns_.m_col_id];
         
         // Use the screen_id in place of window_id for screen capture
-        take_capture("screen", screen_id);
+        std::string filepath = take_capture("screen", screen_id);
+        if (!filepath.empty() && mqtt_client_) {
+            std::string topic = "sauron"; // Use unified MQTT topic
+            bool use_base64 = true;
+            // Pass routing info in a format that won't break JSON
+            std::string routing = "to:agent,from:ui,type:image";
+            mqtt_client_->publish_image(topic, filepath, routing, "screen", use_base64);
+            std::cout << "✅ Published screen capture to MQTT: " << filepath << std::endl;
+        }
     } else {
         std::cerr << "❌ No screen selected" << std::endl;
     }
@@ -322,9 +338,10 @@ void SauronEyePanel::on_tree_view_row_activated(const Gtk::TreeModel::Path& path
         if (!filepath.empty() && mqtt_client_) {
             std::string topic = "sauron"; // Use unified MQTT topic
             bool use_base64 = true;
-            // Add routing information to the JSON payload
-            std::string routing = R"({"to": "agent", "from": "ui", "type": "image"})";
-            mqtt_client_->publish_image(topic, filepath, routing, "window", use_base64);
+            // Pass routing info correctly
+            std::string routing = "to:agent,from:ui,type:image";
+            mqtt_client_->publish_image(topic, filepath, routing, "window-double-click", use_base64); // Updated trigger_type
+            std::cout << "✅ Published window capture (double-click) to MQTT: " << filepath << std::endl; // Added log
         }
     }
 }
@@ -333,16 +350,16 @@ void SauronEyePanel::on_screens_row_activated(const Gtk::TreeModel::Path& path, 
     Gtk::TreeModel::iterator iter = screens_list_store_->get_iter(path);
     if (iter) {
         Gtk::TreeModel::Row row = *iter;
-        unsigned long screen_id = row[screens_columns_.m_col_id];
+        int screen_id = row[screens_columns_.m_col_id];
         // Capture and immediately publish on double-click
         std::string filepath = take_capture("screen", screen_id);
-        // Always publish via MQTT on double-click
         if (!filepath.empty() && mqtt_client_) {
             std::string topic = "sauron"; // Use unified MQTT topic
             bool use_base64 = true;
-            // Add routing information to the JSON payload
-            std::string routing = R"({"to": "agent", "from": "ui", "type": "image"})";
-            mqtt_client_->publish_image(topic, filepath, routing, "screen", use_base64);
+            // Pass routing info correctly
+            std::string routing = "to:agent,from:ui,type:image";
+            mqtt_client_->publish_image(topic, filepath, routing, "screen-double-click", use_base64); // Updated trigger_type
+            std::cout << "✅ Published screen capture (double-click) to MQTT: " << filepath << std::endl; // Added log
         }
     }
 }

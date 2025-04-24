@@ -60,19 +60,28 @@ private:
         std::string get_css_class() const;
     };
     
+    // MQTT Client
+    std::shared_ptr<MqttClient> mqtt_client_;
+
+    // State
+    int active_conversation_id_ = -1; // ID of the currently loaded conversation
+
+    // UI Callbacks
+    std::function<std::string()> capture_callback_;
+
     // Helper methods
     void setup_ui();
-    void add_user_message(const std::string& text, const std::string& image_path = "");
-    void add_assistant_message(const std::string& text);
-    void add_system_message(const std::string& text);
     void add_message_to_ui(const ChatMessage& message);
     void clear_messages();
     std::string format_timestamp();
-    void send_message();
-    bool is_connected_to_agent();
-    void connect_to_agent();
-    void load_conversation_list();
     void load_conversation_list_dialog(const nlohmann::json& conversations_json);
+    bool is_connected_to_agent();
+    
+    // Message handling functions
+    void send_message();
+    void add_user_message(const std::string& text, const std::string& image_path = "");
+    void add_assistant_message(const std::string& text);
+    void add_system_message(const std::string& text);
 
     // UI components
     Gtk::Frame chat_frame_;
@@ -97,13 +106,9 @@ private:
     Gtk::Button load_conversation_button_;
     
     // Other members
-    std::shared_ptr<MqttClient> mqtt_client_;
-    std::function<std::string()> capture_callback_;
     Glib::RefPtr<Gtk::CssProvider> css_provider_;
-    int active_conversation_id_ = -1; // Initialize to invalid ID
-    bool agent_connected_ = false;
-    Gtk::Label status_label_; // Added back for build compatibility
-    std::string selected_image_path_; // Added back for build compatibility
+    Gtk::Label status_label_;
+    std::string selected_image_path_;
 };
 
 #endif // CHAT_PANEL_H

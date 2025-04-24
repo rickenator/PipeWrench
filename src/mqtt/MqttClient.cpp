@@ -4,11 +4,12 @@
 #include <openssl/buffer.h>
 #include <fstream>
 #include <iostream>  // Added include for std::cout, std::cerr, std::endl
-#include <sstream>
+#include <sstream> // Add this include for std::stringstream
 #include <vector>
 #include <chrono>
 #include <ctime>
 #include <filesystem>
+#include <nlohmann/json.hpp> // Add this include for JSON manipulation
 
 MqttClient::MqttClient() : mosq_(nullptr), connected_(false) {
     mosquitto_lib_init();
@@ -68,17 +69,17 @@ void MqttClient::disconnect() {
     }
 }
 
-void MqttClient::on_connect_callback(struct mosquitto* mosq, void* obj, int rc) {
+void MqttClient::on_connect_callback(struct mosquitto* mosq [[maybe_unused]], void* obj, int rc) {
     MqttClient* client = static_cast<MqttClient*>(obj);
     client->connected_ = (rc == 0);
 }
 
-void MqttClient::on_disconnect_callback(struct mosquitto* mosq, void* obj, int rc) {
+void MqttClient::on_disconnect_callback(struct mosquitto* mosq [[maybe_unused]], void* obj, int rc [[maybe_unused]]) {
     MqttClient* client = static_cast<MqttClient*>(obj);
     client->connected_ = false;
 }
 
-void MqttClient::on_message_callback(struct mosquitto* mosq, void* obj, const struct mosquitto_message* message) {
+void MqttClient::on_message_callback(struct mosquitto* mosq [[maybe_unused]], void* obj, const struct mosquitto_message* message) {
     MqttClient* client = static_cast<MqttClient*>(obj);
     if (client && client->message_callback_) {
         std::string topic(message->topic);
@@ -134,8 +135,9 @@ bool MqttClient::publish(const std::string& topic, const std::string& message) {
 }
 
 bool MqttClient::publish_image(const std::string& topic, const std::string& filename,
-                             const std::string& window_title, const std::string& trigger_type,
-                             bool as_base64) {
+                             const std::string& routing_info, // Renamed parameter for clarity
+                             const std::string& trigger_type,
+                             bool as_base64 [[maybe_unused]]) { // as_base64 is effectively always true now
     if (!mosq_ || !connected_) {
         std::cerr << "❌ Cannot publish: MQTT client not connected" << std::endl;
         return false;
@@ -149,14 +151,13 @@ bool MqttClient::publish_image(const std::string& topic, const std::string& file
 
     std::vector<unsigned char> buffer(std::istreambuf_iterator<char>(file), {});
     
-    std::string payload;
-    // Always encode image data as Base64 to ensure valid JSON
+    std::string base64_payload;
+    // Always encode image data as Base64
     BIO *bio, *b64;
     BUF_MEM *bufferPtr;
 
     b64 = BIO_new(BIO_f_base64());
-    // Avoid newlines in base64 output
-    BIO_set_flags(b64, BIO_FLAGS_BASE64_NO_NL);
+    BIO_set_flags(b64, BIO_FLAGS_BASE64_NO_NL); // Avoid newlines
     bio = BIO_new(BIO_s_mem());
     bio = BIO_push(b64, bio);
 
@@ -164,26 +165,37 @@ bool MqttClient::publish_image(const std::string& topic, const std::string& file
     BIO_flush(bio);
     BIO_get_mem_ptr(bio, &bufferPtr);
 
-    payload.assign(bufferPtr->data, bufferPtr->length);
+    base64_payload.assign(bufferPtr->data, bufferPtr->length);
     BIO_free_all(bio);
 
-    // Build JSON with metadata and base64 image
-    // Get timestamp in ISO8601 UTC
+    // Parse routing_info string (e.g., "to:agent,from:ui,type:image")
+    nlohmann::json msg_json;
+    std::stringstream ss_routing(routing_info);
+    std::string segment;
+    while (std::getline(ss_routing, segment, ',')) {
+        size_t colon_pos = segment.find(':');
+        if (colon_pos != std::string::npos) {
+            std::string key = segment.substr(0, colon_pos);
+            std::string value = segment.substr(colon_pos + 1);
+            msg_json[key] = value; // Add routing info as top-level fields
+        }
+    }
+
+    // Add metadata and image data
     auto now = std::chrono::system_clock::now();
     std::time_t t = std::chrono::system_clock::to_time_t(now);
     char tsbuf[20];
     std::strftime(tsbuf, sizeof(tsbuf), "%FT%TZ", std::gmtime(&t));
-    // Extract just the filename
-    std::string fname = std::filesystem::path(filename).filename().string();
-    std::ostringstream ss;
-    ss << '{'
-       << "\"filename\":\"" << fname << "\","
-       << "\"window_title\":\"" << window_title << "\","
-       << "\"trigger_type\":\"" << trigger_type << "\","
-       << "\"timestamp\":\"" << tsbuf << "\","
-       << "\"image_data\":\"" << payload << "\""
-       << '}';
-    std::string message = ss.str();
+    
+    msg_json["filename"] = std::filesystem::path(filename).filename().string();
+    msg_json["trigger_type"] = trigger_type;
+    msg_json["timestamp"] = tsbuf;
+    msg_json["image_data"] = base64_payload; // Add base64 image data
+
+    // Add a placeholder for the actual window title if needed, or remove if unused by agent
+    // msg_json["window_title"] = "Actual Window Title"; // Example if needed
+
+    std::string message = msg_json.dump(); // Serialize the JSON object
 
     int rc = mosquitto_publish(mosq_, nullptr, topic.c_str(), 
                              message.length(), message.c_str(), 

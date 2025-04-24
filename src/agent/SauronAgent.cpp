@@ -509,6 +509,7 @@ void SauronAgent::handle_ui_message(const json& msg_json) {
     const std::string unified_topic = "sauron"; // Use unified topic for all publishes
 
     try {
+        // Handle both the old "user_message" format and the new "text" format
         if (type == "user_message") {
             if (!msg_json.contains("message") || !msg_json["message"].is_string()) {
                  add_debug_text("❌ 'user_message' missing 'message' field.\n");
@@ -516,7 +517,16 @@ void SauronAgent::handle_ui_message(const json& msg_json) {
             }
             std::string message = msg_json["message"];
             std::string image_path = msg_json.value("image_path", ""); // Use .value for optional fields
-            add_debug_text("👤 User message: " + message + (image_path.empty() ? "" : " (with image)") + "\n");
+            add_debug_text("👤 User message (old format): " + message + (image_path.empty() ? "" : " (with image)") + "\n");
+            send_message_to_ai(message, image_path);
+        } else if (type == "text") {
+            if (!msg_json.contains("data") || !msg_json["data"].is_string()) {
+                 add_debug_text("❌ 'text' message missing 'data' field.\n");
+                 return;
+            }
+            std::string message = msg_json["data"];
+            std::string image_path = msg_json.value("image_path", ""); // Use .value for optional fields
+            add_debug_text("👤 User message (text format): " + message + (image_path.empty() ? "" : " (with image)") + "\n");
             send_message_to_ai(message, image_path);
         } else if (type == "start_conversation") {
             // Start a new conversation
@@ -619,17 +629,6 @@ void SauronAgent::handle_ui_message(const json& msg_json) {
                  add_debug_text("❌ Failed to publish conversation_list response.\n");
             } else {
                  add_debug_text("   📤 Sent conversation_list response.\n");
-            }
-        } else if (type == "ping") {
-            // Respond to ping from UI
-            json response;
-            response["to"] = "ui";
-            response["from"] = "agent";
-            response["type"] = "pong";
-            if (mqtt_client_->publish(unified_topic, response.dump())) {
-                add_debug_text("🏓 Responded to ping from UI\n");
-            } else {
-                 add_debug_text("❌ Failed to publish pong response.\n");
             }
         } else {
              add_debug_text("❓ Received unknown message type: " + type + "\n");

@@ -66,7 +66,7 @@ private:
     // Removed: mqtt_command_topic_entry_ - using unified topic
     Gtk::Label mqtt_status_label_;
     Gtk::Button mqtt_connect_button_;
-    Gtk::Button send_button_;
+    Gtk::Button mqtt_save_settings_button_;
 
     // Recent captures panel
     Gtk::Frame captures_frame_{"Recent Captures"};
@@ -101,6 +101,7 @@ private:
     // GUI event handlers
     void on_capture_taken(const std::string& filename);
     void on_mqtt_connect_clicked();
+    void on_save_settings_clicked();
     void on_mqtt_message(const std::string& topic, const std::string& payload);
     void on_panel_capture(const std::string& filepath, const std::string& type, const std::string& id);
     void on_thumbnail_clicked(const std::string& filepath);

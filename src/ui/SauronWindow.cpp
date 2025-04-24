@@ -28,7 +28,6 @@ SauronWindow::SauronWindow()
       sauron_eye_panel_(capturer_, mqtt_client_),
       chat_panel_(mqtt_client_),
       mqtt_connect_button_("Connect"),
-      send_button_("Send Latest"),
       debug_buffer_(Gtk::TextBuffer::create())
 {
     set_title("Sauron's Eye");
@@ -43,9 +42,6 @@ SauronWindow::SauronWindow()
     // Left panel setup - Window capture
     left_panel_.set_size_request(600, -1);
     left_panel_.pack_start(sauron_eye_panel_, true, true);
-    send_button_.set_sensitive(false); // Initially disabled until we have a capture
-    send_button_.signal_clicked().connect(sigc::mem_fun(*this, &SauronWindow::on_send_clicked));
-    left_panel_.pack_start(send_button_, false, false);
 
     // Right panel setup - MQTT Settings
     right_panel_.set_size_request(300, -1);
@@ -87,18 +83,32 @@ SauronWindow::SauronWindow()
         hb->pack_start(mqtt_topic_entry_, true, true);
         mqtt_box_.pack_start(*hb, false, false);
     }
-    // Removed separate command topic entry - using unified topic
 
+    // Create button box for MQTT controls
+    auto mqtt_buttons_box = Gtk::manage(new Gtk::Box(Gtk::ORIENTATION_HORIZONTAL, 5));
+    
+    // Add status label
     mqtt_status_label_.set_markup("<i>Not connected</i>");
-    mqtt_box_.pack_start(mqtt_status_label_, false, false);
+    mqtt_buttons_box->pack_start(mqtt_status_label_, true, true);
+    
+    // Add Connect button
     mqtt_connect_button_.signal_clicked().connect(sigc::mem_fun(*this, &SauronWindow::on_mqtt_connect_clicked));
-    mqtt_box_.pack_start(mqtt_connect_button_, false, false);
+    mqtt_buttons_box->pack_end(mqtt_connect_button_, false, false);
+    
+    // Add Save Settings button
+    mqtt_save_settings_button_.set_label("Save Settings");
+    mqtt_save_settings_button_.signal_clicked().connect(sigc::mem_fun(*this, &SauronWindow::on_save_settings_clicked));
+    mqtt_buttons_box->pack_end(mqtt_save_settings_button_, false, false);
+    
+    mqtt_box_.pack_start(*mqtt_buttons_box, false, false);
     right_panel_.pack_start(mqtt_frame_, false, false);
 
     // Recent Captures Panel
     captures_frame_.add(captures_box_);
     captures_scroll_.set_policy(Gtk::POLICY_NEVER, Gtk::POLICY_AUTOMATIC);
     captures_scroll_.add(captures_flow_);
+    // Set a minimum height for the captures area to make it taller
+    captures_scroll_.set_min_content_height(300); // Increased height
     captures_flow_.set_valign(Gtk::ALIGN_START);
     captures_flow_.set_max_children_per_line(2);
     captures_flow_.set_selection_mode(Gtk::SELECTION_SINGLE);
@@ -194,7 +204,6 @@ void SauronWindow::on_capture_taken(const std::string& filename) {
     last_capture_path_ = filename;
     refresh_captures();
     status_bar_.push("Captured: " + filename);
-    send_button_.set_sensitive(true); // Enable send button when a capture is taken
 }
 
 // Handle key press and delete events
@@ -342,11 +351,15 @@ void SauronWindow::on_thumbnail_clicked(const std::string& filepath) {
     const auto topic = mqtt_topic_entry_.get_text();
     std::cout << "Publishing thumbnail to topic: " << topic << std::endl;
     if (mqtt_connected_) {
+        // Pass routing info correctly
+        std::string routing = "to:agent,from:ui,type:image";
         if (mqtt_client_->publish_image(topic, 
-                                      filepath, "", "manual", true)) {
+                                      filepath, routing, "thumbnail-click", true)) { // Updated trigger_type
             status_bar_.push("Sent to MQTT: " + filepath);
+            std::cout << "✅ Published thumbnail capture (click) to MQTT: " << filepath << std::endl; // Added log
         } else {
             status_bar_.push("Failed to send to MQTT: " + filepath);
+            std::cerr << "❌ Failed to publish thumbnail capture (click) to MQTT: " << filepath << std::endl; // Added log
         }
     }
 }
@@ -383,18 +396,9 @@ void SauronWindow::on_thumbnail_activated_capture(const std::string& filepath) {
     std::system(command.c_str());
 }
 
-void SauronWindow::on_send_clicked() {
-    if (!last_capture_path_.empty() && mqtt_connected_) {
-        if (mqtt_client_->publish_image(mqtt_topic_entry_.get_text(), 
-                                      last_capture_path_, "", "manual", true)) {
-            status_bar_.push("Sent latest capture to MQTT: " + last_capture_path_);
-        } else {
-            status_bar_.push("Failed to send latest capture to MQTT: " + last_capture_path_);
-        }
-    }
-}
+// "Send Latest" button removed as redundant with thumbnail functionality
 
-void SauronWindow::on_panel_capture(const std::string& filepath, const std::string& type, const std::string& id) {
+void SauronWindow::on_panel_capture(const std::string& filepath, const std::string& type, const std::string& id [[maybe_unused]]) {
     if (mqtt_connected_ && !filepath.empty()) {
         const auto topic = mqtt_topic_entry_.get_text();
         // Always encode as Base64
@@ -409,41 +413,83 @@ void SauronWindow::on_panel_capture(const std::string& filepath, const std::stri
 void SauronWindow::load_settings() {
     Glib::KeyFile keyfile;
     const std::string fname = "settings.ini";
+    
+    // Default values
+    std::string default_host = "localhost";
+    int default_port = 1883;
+    
+    // Set default values first
+    mqtt_host_entry_.set_text(default_host);
+    mqtt_port_entry_.set_text(std::to_string(default_port));
+    mqtt_topic_entry_.set_text("sauron"); // Topic is always fixed
+    
+    // Try to load from file if it exists
     if (Glib::file_test(fname, Glib::FILE_TEST_EXISTS)) {
         try {
             keyfile.load_from_file(fname);
-            auto host = keyfile.get_string("MQTT", "host");
-            auto port = keyfile.get_integer("MQTT", "port");
-            mqtt_host_entry_.set_text(host);
-            mqtt_port_entry_.set_text(std::to_string(port));
             
-            // Always use "sauron" as the unified topic regardless of what's in the settings file
-            mqtt_topic_entry_.set_text("sauron");
+            // Only override defaults if keys exist in the file
+            if (keyfile.has_group("MQTT")) {
+                if (keyfile.has_key("MQTT", "host")) {
+                    mqtt_host_entry_.set_text(keyfile.get_string("MQTT", "host"));
+                    std::cout << "Loaded MQTT host from settings: " << mqtt_host_entry_.get_text() << std::endl;
+                }
+                
+                if (keyfile.has_key("MQTT", "port")) {
+                    mqtt_port_entry_.set_text(std::to_string(keyfile.get_integer("MQTT", "port")));
+                    std::cout << "Loaded MQTT port from settings: " << mqtt_port_entry_.get_text() << std::endl;
+                }
+            } else {
+                std::cout << "Settings file exists but has no MQTT group, using defaults" << std::endl;
+            }
         } catch (const Glib::Error& e) {
-            std::cerr << "Failed to load settings: " << e.what() << std::endl;
+            std::cerr << "Failed to load settings, using defaults: " << e.what() << std::endl;
         }
+    } else {
+        std::cout << "No settings file found at '" << fname << "', using defaults" << std::endl;
     }
+    
     // Store original values
     orig_mqtt_host_ = mqtt_host_entry_.get_text();
     orig_mqtt_port_ = mqtt_port_entry_.get_text();
-    // No need to store topic value as it's fixed
+    // Topic is fixed, no need to track changes
 }
 
 void SauronWindow::save_settings() {
     Glib::KeyFile keyfile;
+    const std::string fname = "settings.ini";
+    
+    // Load existing settings if the file exists to preserve other settings
+    if (Glib::file_test(fname, Glib::FILE_TEST_EXISTS)) {
+        try {
+            keyfile.load_from_file(fname);
+        } catch (const Glib::Error& e) {
+            std::cerr << "Warning: Failed to load existing settings file: " << e.what() << std::endl;
+            // Continue anyway, we'll create a new file
+        }
+    }
+    
+    // Update MQTT settings
     keyfile.set_string("MQTT", "host", mqtt_host_entry_.get_text());
     keyfile.set_integer("MQTT", "port", std::stoi(mqtt_port_entry_.get_text()));
     keyfile.set_string("MQTT", "topic", "sauron"); // Always save the unified topic
     
     try {
-        keyfile.save_to_file("settings.ini");
+        keyfile.save_to_file(fname);
+        std::cout << "Settings saved to " << fname << std::endl;
+        status_bar_.push("Settings saved successfully");
+        
+        // Update original values
+        orig_mqtt_host_ = mqtt_host_entry_.get_text();
+        orig_mqtt_port_ = mqtt_port_entry_.get_text();
     } catch (const Glib::Error& e) {
         std::cerr << "Failed to save settings: " << e.what() << std::endl;
+        status_bar_.push("Error: Failed to save settings");
     }
-    // Update original values
-    orig_mqtt_host_ = mqtt_host_entry_.get_text();
-    orig_mqtt_port_ = mqtt_port_entry_.get_text();
-    // No need to track topic values as they're fixed
+}
+
+void SauronWindow::on_save_settings_clicked() {
+    save_settings();
 }
 
 void SauronWindow::on_keyboard_capture_triggered() {
